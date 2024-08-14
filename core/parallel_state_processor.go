@@ -799,10 +799,11 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	}
 
 	dispatchTime := time.Now()
-
+	executionTime := time.Now()
 	// wait until all Txs have processed.
 	for {
 		if len(commonTxs) == txNum {
+			executionTime = time.Now()
 			// put it ahead of chan receive to avoid waiting for empty block
 			break
 		}
@@ -880,7 +881,8 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		"InitTime", common.PrettyDuration(initialTime.Sub(procTime)),
 		"DagLoadTime", common.PrettyDuration(dagLoadTime.Sub(initialTime)),
 		"DispatchTime", common.PrettyDuration(dispatchTime.Sub(dagLoadTime)),
-		"resultProcessTime", common.PrettyDuration(resultProcessTime.Sub(dispatchTime)),
+		"ExecTime", common.PrettyDuration(executionTime.Sub(dispatchTime)),
+		"resultProcessTime", common.PrettyDuration(resultProcessTime.Sub(executionTime)),
 		"postProcessTime", common.PrettyDuration(postProcessTime.Sub(resultProcessTime)),
 		"wholeTime", common.PrettyDuration(postProcessTime.Sub(procTime)))
 

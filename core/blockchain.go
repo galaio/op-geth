@@ -1990,7 +1990,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool) (int, error)
 		}
 		ptime := time.Since(pstart)
 
-		log.Warn("After process", "block number", block.NumberU64(), "ptime", common.PrettyDuration(ptime))
+		log.Warn("After process", "block number", block.NumberU64(), "txs", block.Transactions().Len(), "ptime", common.PrettyDuration(ptime))
 		vstart := time.Now()
 		if err := bc.validator.ValidateState(block, statedb, receipts, usedGas); err != nil {
 			bc.reportBlock(block, receipts, err)
