@@ -277,8 +277,12 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 		atomic.CompareAndSwapInt32(&txReq.runnable, 0, 1)
 		return nil
 	}
+	executeStart := time.Now()
 	execNum := txReq.executedNum.Add(1)
 	slotDB := state.NewSlotDB(txReq.baseStateDB, txReq.txIndex, int(mIndex), p.unconfirmedDBs, txReq.useDAG)
+
+	newSlotDBDur := time.Since(executeStart)
+
 	blockContext := NewEVMBlockContext(txReq.block.Header(), p.bc, nil, p.config, slotDB) // can share blockContext within a block for efficiency
 	txContext := NewEVMTxContext(txReq.msg)
 	vmenv := vm.NewEVM(blockContext, txContext, slotDB, p.config, txReq.vmConfig)
@@ -296,6 +300,8 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 	}
 
 	slotDB.SetTxContext(txReq.tx.Hash(), txReq.txIndex)
+
+	prepareDur := time.Since(executeStart) - newSlotDBDur
 
 	evm, result, err := applyTransactionStageExecution(txReq.msg, gpSlot, slotDB, vmenv, p.delayGasFee)
 	txResult := ParallelTxResult{
@@ -338,6 +344,10 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 			"slotIndex", slotIndex, "txIndex", txReq.txIndex)
 	}
 	p.unconfirmedResults.Store(txReq.txIndex, &txResult)
+	executeDur := time.Since(executeStart)
+	log.Debug("ExecuteInSlot", "txIndex", txReq.txIndex,
+		"conflictIndex", conflictIndex, "baseIdx", slotDB.BaseTxIndex(),
+		"executeDur", executeDur, "New SlotDB Dur", newSlotDBDur, "prepareDur", prepareDur)
 	return &txResult
 }
 
@@ -581,14 +591,16 @@ func (p *ParallelStateProcessor) handleTxResults() *ParallelTxResult {
 }
 
 // wait until the next Tx is executed and its result is merged to the main stateDB
-func (p *ParallelStateProcessor) confirmTxResults(statedb *state.StateDB, gp *GasPool) *ParallelTxResult {
+func (p *ParallelStateProcessor) confirmTxResults(statedb *state.StateDB, gp *GasPool) (*ParallelTxResult, time.Duration, time.Duration) {
+	start := time.Now()
 	result := p.handleTxResults()
+	conflictCheckDur := time.Since(start)
 	if result == nil {
-		return nil
+		return nil, conflictCheckDur, 0
 	}
 	// ok, the tx result is valid and can be merged
 	if result.err != nil {
-		return result
+		return result, conflictCheckDur, 0
 	}
 
 	if err := gp.SubGas(result.receipt.GasUsed); err != nil {
@@ -607,7 +619,7 @@ func (p *ParallelStateProcessor) confirmTxResults(statedb *state.StateDB, gp *Ga
 
 	// merge slotDB into mainDB
 	statedb.MergeSlotDB(result.slotDB, result.receipt, resultTxIndex, result.result.delayFees)
-
+	mergeDuration := time.Since(start) - conflictCheckDur
 	delayGasFee := result.result.delayFees
 	// add delayed gas fee
 	if delayGasFee != nil {
@@ -647,7 +659,7 @@ func (p *ParallelStateProcessor) confirmTxResults(statedb *state.StateDB, gp *Ga
 		default:
 		}
 	}
-	return result
+	return result, conflictCheckDur, mergeDuration
 }
 
 func (p *ParallelStateProcessor) doCleanUp() {
@@ -800,6 +812,8 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 
 	dispatchTime := time.Now()
 	var mergeDur time.Duration = 0
+	var totalConflictCheck time.Duration = 0
+	var totalMergeDBDur time.Duration = 0
 	// wait until all Txs have processed.
 	for {
 		if len(commonTxs) == txNum {
@@ -829,7 +843,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 
 		for {
 			mergeTimeStart := time.Now()
-			result := p.confirmTxResults(statedb, gp)
+			result, conflictCheckDur, mergeDBDur := p.confirmTxResults(statedb, gp)
 			if result == nil {
 				break
 			}
@@ -844,6 +858,8 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			receipts = append(receipts, result.receipt)
 			mergeTime := time.Since(mergeTimeStart)
 			mergeDur += mergeTime
+			totalConflictCheck += conflictCheckDur
+			totalMergeDBDur += mergeDBDur
 		}
 	}
 
@@ -885,6 +901,8 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		"DispatchTime", common.PrettyDuration(dispatchTime.Sub(dagLoadTime)),
 		"ExecTime", common.PrettyDuration(resultProcessTime.Sub(dispatchTime)),
 		"mergeTime", common.PrettyDuration(mergeDur),
+		"totalConflictCheckDur", common.PrettyDuration(totalConflictCheck),
+		"totalMergeDBDur", common.PrettyDuration(totalMergeDBDur),
 		"postProcessTime", common.PrettyDuration(postProcessTime.Sub(resultProcessTime)),
 		"wholeTime", common.PrettyDuration(postProcessTime.Sub(procTime)))
 
