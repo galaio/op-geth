@@ -1440,9 +1440,13 @@ func NewEmptySlotDB() *ParallelStateDB {
 
 // CopyForSlot copy all the basic fields, initialize the memory ones
 func (s *StateDB) CopyForSlot() *ParallelStateDB {
+	start := time.Now()
+
 	state := s.parallelDBManager.allocate()
 	state.db = s.db
 	s.preimages = make(map[common.Hash][]byte, len(s.preimages))
+
+	allocateSlotDBDur := time.Since(start)
 
 	s.snapParallelLock.RLock()
 	for k, v := range s.snapDestructs {
@@ -1455,6 +1459,8 @@ func (s *StateDB) CopyForSlot() *ParallelStateDB {
 		state.snap = s.snap
 	}
 
+	destructCopyDur := time.Since(start) - allocateSlotDBDur
+
 	// Deep copy the state changes made in the scope of block
 	// along with their original values.
 	s.AccountMux.Lock()
@@ -1465,7 +1471,10 @@ func (s *StateDB) CopyForSlot() *ParallelStateDB {
 	state.storages = copy2DSet(s.storages)
 	state.storagesOrigin = copy2DSet(state.storagesOrigin)
 	s.StorageMux.Unlock()
+	copyAccountDur := time.Since(start) - allocateSlotDBDur - destructCopyDur
+	copyForSlotDur := time.Since(start)
 
+	log.Debug("CopyForSlot", "whole time", copyForSlotDur, "allocateSlotDBDur", allocateSlotDBDur, "copyDestDur", destructCopyDur, "copyAccountDur", copyAccountDur)
 	return state
 }
 
