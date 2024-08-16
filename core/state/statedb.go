@@ -2440,7 +2440,6 @@ func (s *StateDB) FinaliseRWSet() error {
 			// set indefinitely). Note only the first occurred self-destruct
 			// event is tracked.
 			if _, ok := s.stateObjectsDestruct[obj.address]; !ok {
-				log.Debug("FinaliseRWSet find Destruct", "tx", s.txIndex, "addr", addr, "selfDestructed", obj.selfDestructed)
 				s.RecordWrite(types.AccountStateKey(addr, types.AccountSuicide), struct{}{})
 			}
 		} else {

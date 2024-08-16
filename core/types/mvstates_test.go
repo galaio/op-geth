@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"github.com/ethereum/go-ethereum/common"
 	"testing"
 	"time"
 
@@ -450,10 +451,13 @@ func randInRange(i, j int) (int, bool) {
 }
 
 func str2key(k string) RWKey {
-	key := RWKey{}
-	if len(k) > len(key) {
-		k = k[:len(key)]
+	appendLen := common.AddressLength + common.HashLength
+	if len(k) > appendLen {
+		k = k[:appendLen]
 	}
-	copy(key[:], k)
-	return key
+
+	buf := make([]byte, 1+appendLen)
+	buf[0] = StorageStatePrefix
+	copy(buf[1:], k)
+	return RWKey(bytes2Str(buf))
 }

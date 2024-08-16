@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
@@ -18,7 +19,8 @@ const (
 	StorageStatePrefix = 's'
 )
 
-type RWKey [1 + common.AddressLength + common.HashLength]byte
+// RWKey max length is [1 + common.AddressLength + common.HashLength]byte
+type RWKey string
 
 type AccountState byte
 
@@ -35,26 +37,26 @@ const (
 )
 
 func AccountStateKey(account common.Address, state AccountState) RWKey {
-	var key RWKey
-	key[0] = AccountStatePrefix
-	copy(key[1:], account.Bytes())
-	key[1+common.AddressLength] = byte(state)
-	return key
+	buf := make([]byte, 2+common.AddressLength)
+	buf[0] = AccountStatePrefix
+	copy(buf[1:], account.Bytes())
+	buf[1+common.AddressLength] = byte(state)
+	return RWKey(bytes2Str(buf))
 }
 
 func StorageStateKey(account common.Address, state common.Hash) RWKey {
-	var key RWKey
-	key[0] = StorageStatePrefix
-	copy(key[1:], account.Bytes())
-	copy(key[1+common.AddressLength:], state.Bytes())
-	return key
+	buf := make([]byte, 1+common.AddressLength+common.HashLength)
+	buf[0] = StorageStatePrefix
+	copy(buf[1:], account.Bytes())
+	copy(buf[1+common.AddressLength:], state.Bytes())
+	return RWKey(bytes2Str(buf))
 }
 
-func (key *RWKey) IsAccountState() (bool, AccountState) {
+func (key RWKey) IsAccountState() (bool, AccountState) {
 	return AccountStatePrefix == key[0], AccountState(key[1+common.AddressLength])
 }
 
-func (key *RWKey) IsAccountSelf() bool {
+func (key RWKey) IsAccountSelf() bool {
 	ok, s := key.IsAccountState()
 	if !ok {
 		return false
@@ -62,7 +64,7 @@ func (key *RWKey) IsAccountSelf() bool {
 	return s == AccountSelf
 }
 
-func (key *RWKey) IsAccountSuicide() bool {
+func (key RWKey) IsAccountSuicide() bool {
 	ok, s := key.IsAccountState()
 	if !ok {
 		return false
@@ -70,20 +72,21 @@ func (key *RWKey) IsAccountSuicide() bool {
 	return s == AccountSuicide
 }
 
-func (key *RWKey) ToAccountSelf() RWKey {
+func (key RWKey) ToAccountSelf() RWKey {
 	return AccountStateKey(key.Addr(), AccountSelf)
 }
 
-func (key *RWKey) IsStorageState() bool {
+func (key RWKey) IsStorageState() bool {
 	return StorageStatePrefix == key[0]
 }
 
-func (key *RWKey) String() string {
-	return hex.EncodeToString(key[:])
+func (key RWKey) String() string {
+	return hex.EncodeToString(str2Bytes(string(key)))
 }
 
-func (key *RWKey) Addr() common.Address {
-	return common.BytesToAddress(key[1 : 1+common.AddressLength])
+func (key RWKey) Addr() common.Address {
+	raw := str2Bytes(string(key))
+	return common.BytesToAddress(raw[1 : 1+common.AddressLength])
 }
 
 // StateVersion record specific TxIndex & TxIncarnation
@@ -402,7 +405,6 @@ func (s *MVStates) ReadState(txIndex int, key RWKey) *RWItem {
 // FulfillRWSet it can execute as async, and rwSet & stat must guarantee read-only
 // try to generate TxDAG, when fulfill RWSet
 func (s *MVStates) FulfillRWSet(rwSet *RWSet, stat *ExeStat) error {
-	log.Debug("FulfillRWSet", "total", len(s.rwSets), "cur", rwSet.ver.TxIndex, "reads", len(rwSet.readSet), "writes", len(rwSet.writeSet))
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	index := rwSet.ver.TxIndex
@@ -428,7 +430,6 @@ func (s *MVStates) FulfillRWSet(rwSet *RWSet, stat *ExeStat) error {
 
 // Finalise it will put target write set into pending writes.
 func (s *MVStates) Finalise(index int) error {
-	log.Debug("Finalise", "total", len(s.rwSets), "index", index)
 	s.lock.Lock()
 
 	rwSet := s.rwSets[index]
@@ -653,4 +654,12 @@ func (m TxDepMap) toArray() []uint64 {
 
 func (m TxDepMap) remove(index int) {
 	delete(m, index)
+}
+
+func bytes2Str(buf []byte) string {
+	return *(*string)(unsafe.Pointer(&buf))
+}
+
+func str2Bytes(s string) []byte {
+	return *(*[]byte)(unsafe.Pointer(&s))
 }
