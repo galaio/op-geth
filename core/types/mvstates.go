@@ -613,12 +613,12 @@ func (s *MVStates) ResolveTxDAG(txCnt int, gasFeeReceivers []common.Address) (Tx
 			}
 		}
 		txDAG.TxDeps[i].TxIndexes = []uint64{}
+		if len(s.txDepCache) <= i {
+			s.resolveDepsCacheByWrites(i, s.rwSets[i])
+		}
 		if s.rwSets[i].excludedTx {
 			txDAG.TxDeps[i].SetFlag(ExcludedTxFlag)
 			continue
-		}
-		if s.txDepCache[i] == nil {
-			s.resolveDepsCacheByWrites(i, s.rwSets[i])
 		}
 		deps := s.txDepCache[i].deps()
 		if len(deps) <= (txCnt-1)/2 {
