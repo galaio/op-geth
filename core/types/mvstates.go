@@ -469,7 +469,6 @@ func (s *MVStates) innerFinalise(index int) error {
 func (s *MVStates) resolveDepsCacheByWrites(index int, rwSet *RWSet) {
 	// analysis dep, if the previous transaction is not executed/validated, re-analysis is required
 	depSlice := NewTxDepSlice(0)
-	depMap := make(map[uint64]struct{})
 	if rwSet.excludedTx {
 		s.txDepCache = append(s.txDepCache, depSlice)
 		return
@@ -487,11 +486,7 @@ func (s *MVStates) resolveDepsCacheByWrites(index int, rwSet *RWSet) {
 			}
 			items := writes.FindPrevWrites(index)
 			for _, item := range items {
-				tx := uint64(item.TxIndex())
-				if _, ok := depMap[tx]; !ok {
-					depMap[tx] = struct{}{}
-					depSlice.add(tx)
-				}
+				depSlice.add(uint64(item.TxIndex()))
 			}
 		}
 	} else {
@@ -505,29 +500,36 @@ func (s *MVStates) resolveDepsCacheByWrites(index int, rwSet *RWSet) {
 			}
 			items := w.FindPrevWrites(index)
 			for _, item := range items {
-				tx := uint64(item.TxIndex())
-				if _, ok := depMap[tx]; !ok {
-					depMap[tx] = struct{}{}
-					depSlice.add(tx)
-				}
+				depSlice.add(uint64(item.TxIndex()))
 			}
 		}
 	}
-
+	if depSlice.len() == 0 {
+		s.txDepCache = append(s.txDepCache, depSlice)
+		return
+	}
+	// clear redundancy deps compared with prev
+	delSlice := NewTxDepSlice(depSlice.len())
 	for _, prev := range depSlice.deps() {
-		// clear redundancy deps compared with prev
 		for _, tx := range s.txDepCache[prev].deps() {
-			if _, ok := depMap[tx]; ok {
-				delete(depMap, tx)
+			if depSlice.exist(tx) {
+				delSlice.add(tx)
 			}
 		}
 	}
-
-	depSlice = NewTxDepSlice(len(depMap))
-	for k := range depMap {
-		depSlice.add(k)
+	if delSlice.len() == 0 {
+		s.txDepCache = append(s.txDepCache, depSlice)
+		return
 	}
-	s.txDepCache = append(s.txDepCache, depSlice)
+
+	nSlice := NewTxDepSlice(depSlice.len() - delSlice.len())
+	for _, tx := range depSlice.deps() {
+		if delSlice.exist(tx) {
+			continue
+		}
+		nSlice.add(tx)
+	}
+	s.txDepCache = append(s.txDepCache, nSlice)
 }
 
 // resolveDepsCache must be executed in order
@@ -658,6 +660,7 @@ type TxDepMaker interface {
 	exist(index uint64) bool
 	deps() []uint64
 	remove(index uint64)
+	len() int
 }
 
 type TxDepSlice struct {
@@ -671,6 +674,9 @@ func NewTxDepSlice(cap int) *TxDepSlice {
 }
 
 func (m *TxDepSlice) add(index uint64) {
+	if m.exist(index) {
+		return
+	}
 	m.indexes = append(m.indexes, index)
 	for i := len(m.indexes) - 1; i > 0; i-- {
 		if m.indexes[i] < m.indexes[i-1] {
@@ -699,6 +705,10 @@ func (m *TxDepSlice) remove(index uint64) {
 	m.indexes = m.indexes[:len(m.indexes)-1]
 }
 
+func (m *TxDepSlice) len() int {
+	return len(m.indexes)
+}
+
 type TxDepMap map[uint64]struct{}
 
 func NewTxDepMap(cap int) TxDepMap {
@@ -725,6 +735,10 @@ func (m TxDepMap) deps() []uint64 {
 
 func (m TxDepMap) remove(index uint64) {
 	delete(m, index)
+}
+
+func (m TxDepMap) len() int {
+	return len(m)
 }
 
 func bytes2Str(buf []byte) string {

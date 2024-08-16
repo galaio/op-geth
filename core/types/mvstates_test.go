@@ -15,7 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const mockRWSetSize = 5000
+const (
+	mockRWSetSize = 5000
+	mockKeySize   = 64
+)
 
 func TestMVStates_BasicUsage(t *testing.T) {
 	ms := NewMVStates(0)
@@ -351,6 +354,32 @@ func TestIsEqualRWVal(t *testing.T) {
 	}
 }
 
+func BenchmarkTxDepSlice(b *testing.B) {
+	src := mockUintSlice(mockKeySize)
+	for i := 0; i < b.N; i++ {
+		t := NewTxDepSlice(0)
+		for j := 0; j < len(src); j++ {
+			if t.exist(src[j]) {
+				continue
+			}
+			t.add(src[j])
+		}
+	}
+}
+
+func BenchmarkTxDepMap(b *testing.B) {
+	src := mockUintSlice(mockKeySize)
+	for i := 0; i < b.N; i++ {
+		t := NewTxDepMap(0)
+		for j := 0; j < len(src); j++ {
+			if t.exist(src[j]) {
+				continue
+			}
+			t.add(src[j])
+		}
+	}
+}
+
 func mockRWSet(index int, read []string, write []string) *RWSet {
 	ver := StateVersion{
 		TxIndex: index,
@@ -370,6 +399,14 @@ func mockRWSet(index int, read []string, write []string) *RWSet {
 	}
 
 	return set
+}
+
+func mockUintSlice(cnt int) []uint64 {
+	ret := make([]uint64, cnt)
+	for i := 0; i < cnt; i++ {
+		ret[i] = rand.Uint64() % uint64(cnt)
+	}
+	return ret
 }
 
 func mockRWSetWithVal(index int, read []interface{}, write []interface{}) *RWSet {
