@@ -71,7 +71,7 @@ func TestMVStates_SimpleResolveTxDAG(t *testing.T) {
 }
 
 func TestMVStates_AsyncDepGen_SimpleResolveTxDAG(t *testing.T) {
-	ms := NewMVStates(10).EnableAsyncDepGen()
+	ms := NewMVStates(10).EnableAsyncGen()
 	finaliseRWSets(t, ms, []*RWSet{
 		mockRWSet(0, []string{"0x00"}, []string{"0x00"}),
 		mockRWSet(1, []string{"0x01"}, []string{"0x01"}),
@@ -97,7 +97,7 @@ func TestMVStates_AsyncDepGen_SimpleResolveTxDAG(t *testing.T) {
 func TestMVStates_ResolveTxDAG_Async(t *testing.T) {
 	txCnt := 10000
 	rwSets := mockRandomRWSet(txCnt)
-	ms1 := NewMVStates(txCnt).EnableAsyncDepGen()
+	ms1 := NewMVStates(txCnt).EnableAsyncGen()
 	for i := 0; i < txCnt; i++ {
 		require.NoError(t, ms1.FulfillRWSet(rwSets[i], nil))
 		require.NoError(t, ms1.Finalise(i))
@@ -172,7 +172,7 @@ func BenchmarkResolveTxDAGByWritesInMVStates(b *testing.B) {
 	ms1 := NewMVStates(mockRWSetSize)
 	for i, rwSet := range rwSets {
 		ms1.rwSets[i] = rwSet
-		ms1.Finalise(i)
+		ms1.innerFinalise(i)
 	}
 	for i := 0; i < b.N; i++ {
 		resolveTxDAGByWritesInMVStates(ms1)
@@ -185,7 +185,7 @@ func BenchmarkMVStates_Finalise(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for k, rwSet := range rwSets {
 			ms1.rwSets[k] = rwSet
-			ms1.Finalise(k)
+			ms1.innerFinalise(k)
 		}
 	}
 }
@@ -194,7 +194,7 @@ func resolveTxDAGInMVStates(s *MVStates) TxDAG {
 	txDAG := NewPlainTxDAG(len(s.rwSets))
 	for i := 0; i < len(s.rwSets); i++ {
 		s.resolveDepsCache(i, s.rwSets[i])
-		txDAG.TxDeps[i].TxIndexes = s.depsCache[i]
+		txDAG.TxDeps[i].TxIndexes = s.txDepCache[i].deps()
 	}
 	return txDAG
 }
@@ -203,7 +203,7 @@ func resolveTxDAGByWritesInMVStates(s *MVStates) TxDAG {
 	txDAG := NewPlainTxDAG(len(s.rwSets))
 	for i := 0; i < len(s.rwSets); i++ {
 		s.resolveDepsCacheByWrites(i, s.rwSets[i])
-		txDAG.TxDeps[i].TxIndexes = s.depsCache[i]
+		txDAG.TxDeps[i].TxIndexes = s.txDepCache[i].deps()
 	}
 	return txDAG
 }

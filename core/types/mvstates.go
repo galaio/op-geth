@@ -33,7 +33,7 @@ const (
 )
 
 const (
-	asyncDepGenChanSize = 10000
+	asyncDepGenChanSize = 30000
 )
 
 func AccountStateKey(account common.Address, state AccountState) RWKey {
@@ -112,8 +112,8 @@ type RWSet struct {
 func NewRWSet(ver StateVersion) *RWSet {
 	return &RWSet{
 		ver:      ver,
-		readSet:  make(map[RWKey]*RWItem, 64),
-		writeSet: make(map[RWKey]*RWItem, 32),
+		readSet:  make(map[RWKey]*RWItem),
+		writeSet: make(map[RWKey]*RWItem),
 	}
 }
 
@@ -243,7 +243,7 @@ type PendingWrites struct {
 
 func NewPendingWrites() *PendingWrites {
 	return &PendingWrites{
-		list: make([]*RWItem, 0, 8),
+		list: make([]*RWItem, 0),
 	}
 }
 
@@ -306,13 +306,12 @@ type MVStates struct {
 
 	// dependency map cache for generating TxDAG
 	// depMapCache[i].exist(j) means j->i, and i > j
-	depMapCache map[int]TxDepMap
-	depsCache   map[int][]uint64
+	txDepCache []TxDepMaker
 
 	// async dep analysis
-	depsGenChan  chan int
-	stopChan     chan struct{}
-	asyncRunning bool
+	asyncGenChan  chan int
+	asyncStopChan chan struct{}
+	asyncRunning  bool
 
 	// execution stat infos
 	stats map[int]*ExeStat
@@ -323,47 +322,44 @@ func NewMVStates(txCount int) *MVStates {
 	return &MVStates{
 		rwSets:          make(map[int]*RWSet, txCount),
 		pendingWriteSet: make(map[RWKey]*PendingWrites, txCount*8),
-		depMapCache:     make(map[int]TxDepMap, txCount),
-		depsCache:       make(map[int][]uint64, txCount),
+		txDepCache:      make([]TxDepMaker, 0, txCount),
 		stats:           make(map[int]*ExeStat, txCount),
 	}
 }
 
-func (s *MVStates) EnableAsyncDepGen() *MVStates {
+func (s *MVStates) EnableAsyncGen() *MVStates {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	s.depsGenChan = make(chan int, asyncDepGenChanSize)
-	s.stopChan = make(chan struct{})
+	s.asyncGenChan = make(chan int, asyncDepGenChanSize)
+	s.asyncStopChan = make(chan struct{})
 	s.asyncRunning = true
-	go s.asyncDepGenLoop()
+	go s.asyncGenLoop()
 	return s
 }
 
 func (s *MVStates) Stop() error {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	s.stopAsyncDepGen()
+	s.stopAsyncGen()
 	return nil
 }
 
-func (s *MVStates) stopAsyncDepGen() {
+func (s *MVStates) stopAsyncGen() {
 	if !s.asyncRunning {
 		return
 	}
 	s.asyncRunning = false
-	if s.stopChan != nil {
-		close(s.stopChan)
+	if s.asyncStopChan != nil {
+		close(s.asyncStopChan)
 	}
 }
 
-func (s *MVStates) asyncDepGenLoop() {
+func (s *MVStates) asyncGenLoop() {
 	for {
 		select {
-		case tx := <-s.depsGenChan:
-			s.lock.Lock()
-			s.resolveDepsCacheByWrites(tx, s.rwSets[tx])
-			s.lock.Unlock()
-		case <-s.stopChan:
+		case tx := <-s.asyncGenChan:
+			s.Finalise(tx)
+		case <-s.asyncStopChan:
 			return
 		}
 	}
@@ -428,18 +424,33 @@ func (s *MVStates) FulfillRWSet(rwSet *RWSet, stat *ExeStat) error {
 	return nil
 }
 
+// AsyncFinalise it will put target write set into pending writes.
+func (s *MVStates) AsyncFinalise(index int) {
+	// async resolve dependency, but non-block action
+	if s.asyncRunning && s.asyncGenChan != nil {
+		s.asyncGenChan <- index
+	}
+}
+
 // Finalise it will put target write set into pending writes.
 func (s *MVStates) Finalise(index int) error {
 	s.lock.Lock()
+	defer s.lock.Unlock()
+	if err := s.innerFinalise(index); err != nil {
+		return err
+	}
 
+	s.resolveDepsCacheByWrites(index, s.rwSets[index])
+	return nil
+}
+
+func (s *MVStates) innerFinalise(index int) error {
 	rwSet := s.rwSets[index]
 	if rwSet == nil {
-		s.lock.Unlock()
 		return fmt.Errorf("finalise a non-exist RWSet, index: %d", index)
 	}
 
 	if index != s.nextFinaliseIndex {
-		s.lock.Unlock()
 		return fmt.Errorf("finalise in wrong order, next: %d, input: %d", s.nextFinaliseIndex, index)
 	}
 
@@ -451,21 +462,17 @@ func (s *MVStates) Finalise(index int) error {
 		s.pendingWriteSet[k].Append(v)
 	}
 	s.nextFinaliseIndex++
-	s.lock.Unlock()
-	// async resolve dependency, but non-block action
-	if s.asyncRunning && s.depsGenChan != nil {
-		s.depsGenChan <- index
-	}
 	return nil
 }
 
+// resolveDepsCacheByWrites must be executed in order
 func (s *MVStates) resolveDepsCacheByWrites(index int, rwSet *RWSet) {
 	// analysis dep, if the previous transaction is not executed/validated, re-analysis is required
-	s.depMapCache[index] = NewTxDeps(8)
+	maker := NewTxDepSlice(0)
 	if rwSet.excludedTx {
+		s.txDepCache = append(s.txDepCache, maker)
 		return
 	}
-	seen := make(map[int]struct{}, 8)
 	// check tx dependency, only check key, skip version
 	if len(s.pendingWriteSet) > len(rwSet.readSet) {
 		for key := range rwSet.readSet {
@@ -479,7 +486,7 @@ func (s *MVStates) resolveDepsCacheByWrites(index int, rwSet *RWSet) {
 			}
 			items := writes.FindPrevWrites(index)
 			for _, item := range items {
-				seen[item.TxIndex()] = struct{}{}
+				maker.add(uint64(item.TxIndex()))
 			}
 		}
 	} else {
@@ -493,29 +500,26 @@ func (s *MVStates) resolveDepsCacheByWrites(index int, rwSet *RWSet) {
 			}
 			items := w.FindPrevWrites(index)
 			for _, item := range items {
-				seen[item.TxIndex()] = struct{}{}
+				maker.add(uint64(item.TxIndex()))
 			}
 		}
 	}
-	for prev := 0; prev < index; prev++ {
-		if _, ok := seen[prev]; !ok {
-			continue
-		}
-		s.depMapCache[index].add(prev)
+
+	temp := make([]uint64, len(maker.deps()))
+	copy(temp, maker.deps())
+	for _, prev := range temp {
 		// clear redundancy deps compared with prev
-		for dep := range s.depMapCache[index] {
-			if s.depMapCache[prev].exist(dep) {
-				s.depMapCache[index].remove(dep)
-			}
-		}
+		maker.diff(s.txDepCache[prev].deps())
 	}
-	s.depsCache[index] = s.depMapCache[index].toArray()
+	s.txDepCache = append(s.txDepCache, maker)
 }
 
+// resolveDepsCache must be executed in order
 func (s *MVStates) resolveDepsCache(index int, rwSet *RWSet) {
 	// analysis dep, if the previous transaction is not executed/validated, re-analysis is required
-	s.depMapCache[index] = NewTxDeps(0)
+	maker := NewTxDepMap(0)
 	if rwSet.excludedTx {
+		s.txDepCache = append(s.txDepCache, maker)
 		return
 	}
 	for prev := 0; prev < index; prev++ {
@@ -531,18 +535,19 @@ func (s *MVStates) resolveDepsCache(index int, rwSet *RWSet) {
 		}
 		// check if there has written op before i
 		if checkDependency(prevSet.writeSet, rwSet.readSet) {
-			s.depMapCache[index].add(prev)
+			maker.add(uint64(prev))
 			// clear redundancy deps compared with prev
-			for dep := range s.depMapCache[index] {
-				if s.depMapCache[prev].exist(dep) {
-					s.depMapCache[index].remove(dep)
+			for _, dep := range maker.deps() {
+				if s.txDepCache[prev].exist(dep) {
+					maker.remove(dep)
 				}
 			}
 		}
 	}
-	s.depsCache[index] = s.depMapCache[index].toArray()
+	s.txDepCache = append(s.txDepCache, maker)
 }
 
+// checkRWSetInconsistent a helper function
 func checkRWSetInconsistent(index int, k RWKey, readSet map[RWKey]*RWItem, writeSet map[RWKey]*RWItem) bool {
 	var (
 		readOk  bool
@@ -573,11 +578,15 @@ func (s *MVStates) ResolveTxDAG(txCnt int, gasFeeReceivers []common.Address) (Tx
 	if len(s.rwSets) != txCnt {
 		return nil, fmt.Errorf("wrong rwSet count, expect: %v, actual: %v", txCnt, len(s.rwSets))
 	}
-	if txCnt != s.nextFinaliseIndex {
-		return nil, fmt.Errorf("resolve in wrong order, next: %d, input: %d", s.nextFinaliseIndex, txCnt)
+	s.stopAsyncGen()
+	// collect all rw sets, try to finalise them
+	for i := s.nextFinaliseIndex; i < txCnt; i++ {
+		if err := s.innerFinalise(i); err != nil {
+			return nil, err
+		}
 	}
-	s.stopAsyncDepGen()
-	txDAG := NewPlainTxDAG(len(s.rwSets))
+
+	txDAG := NewPlainTxDAG(txCnt)
 	for i := 0; i < txCnt; i++ {
 		// check if there are RW with gas fee receiver for gas delay calculation
 		for _, addr := range gasFeeReceivers {
@@ -590,10 +599,10 @@ func (s *MVStates) ResolveTxDAG(txCnt int, gasFeeReceivers []common.Address) (Tx
 			txDAG.TxDeps[i].SetFlag(ExcludedTxFlag)
 			continue
 		}
-		if s.depMapCache[i] == nil {
+		if s.txDepCache[i] == nil {
 			s.resolveDepsCacheByWrites(i, s.rwSets[i])
 		}
-		deps := s.depsCache[i]
+		deps := s.txDepCache[i].deps()
 		if len(deps) <= (txCnt-1)/2 {
 			txDAG.TxDeps[i].TxIndexes = deps
 			continue
@@ -628,22 +637,100 @@ func checkDependency(writeSet map[RWKey]*RWItem, readSet map[RWKey]*RWItem) bool
 	return false
 }
 
-type TxDepMap map[int]struct{}
-
-func NewTxDeps(cap int) TxDepMap {
-	return make(map[int]struct{}, cap)
+type TxDepMaker interface {
+	add(index uint64)
+	exist(index uint64) bool
+	deps() []uint64
+	remove(index uint64)
+	diff(prevs []uint64)
 }
 
-func (m TxDepMap) add(index int) {
+type TxDepSlice struct {
+	indexes []uint64
+}
+
+func NewTxDepSlice(cap uint64) *TxDepSlice {
+	return &TxDepSlice{
+		indexes: make([]uint64, 0, cap),
+	}
+}
+
+func (m *TxDepSlice) add(index uint64) {
+	if m.exist(index) {
+		return
+	}
+	m.indexes = append(m.indexes, index)
+	for i := len(m.indexes) - 1; i > 0; i-- {
+		if m.indexes[i] < m.indexes[i-1] {
+			m.indexes[i-1], m.indexes[i] = m.indexes[i], m.indexes[i-1]
+		}
+	}
+}
+
+func (m *TxDepSlice) exist(index uint64) bool {
+	_, ok := slices.BinarySearch(m.indexes, index)
+	return ok
+}
+
+func (m *TxDepSlice) deps() []uint64 {
+	return m.indexes
+}
+
+func (m *TxDepSlice) remove(index uint64) {
+	pos, ok := slices.BinarySearch(m.indexes, index)
+	if !ok {
+		return
+	}
+	for i := pos; i < len(m.indexes)-1; i++ {
+		m.indexes[i] = m.indexes[i+1]
+	}
+	m.indexes = m.indexes[:len(m.indexes)-1]
+}
+
+func (m *TxDepSlice) diff(prevs []uint64) {
+	var i, j int
+	var dup []uint64
+	for i < len(m.indexes) && j < len(prevs) {
+		if m.indexes[i] > prevs[j] {
+			j++
+		} else if m.indexes[i] < prevs[j] {
+			if dup != nil {
+				dup = append(dup, m.indexes[i])
+			}
+			i++
+		} else {
+			if dup == nil {
+				dup = make([]uint64, i)
+				copy(dup, m.indexes[:i])
+			}
+			i++
+			j++
+		}
+	}
+	if dup != nil {
+		for ; i < len(m.indexes); i++ {
+			dup = append(dup, m.indexes[i])
+		}
+		m.indexes = dup
+	}
+}
+
+type TxDepMap map[uint64]struct{}
+
+func NewTxDepMap(cap int) TxDepMap {
+	return make(map[uint64]struct{}, cap)
+}
+
+func (m TxDepMap) add(index uint64) {
 	m[index] = struct{}{}
 }
 
-func (m TxDepMap) exist(index int) bool {
+func (m TxDepMap) exist(index uint64) bool {
 	_, ok := m[index]
 	return ok
 }
 
-func (m TxDepMap) toArray() []uint64 {
+func (m TxDepMap) deps() []uint64 {
 	ret := make([]uint64, 0, len(m))
 	for index := range m {
 		ret = append(ret, uint64(index))
@@ -652,8 +739,11 @@ func (m TxDepMap) toArray() []uint64 {
 	return ret
 }
 
-func (m TxDepMap) remove(index int) {
+func (m TxDepMap) remove(index uint64) {
 	delete(m, index)
+}
+
+func (m TxDepMap) diff(prevs []uint64) {
 }
 
 func bytes2Str(buf []byte) string {

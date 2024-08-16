@@ -2401,7 +2401,8 @@ func (s *StateDB) ResetMVStates(txCount int) {
 	if s.mvStates != nil {
 		s.mvStates.Stop()
 	}
-	s.mvStates = types.NewMVStates(txCount).EnableAsyncDepGen()
+
+	s.mvStates = types.NewMVStates(txCount).EnableAsyncGen()
 	s.rwSet = nil
 }
 
@@ -2454,7 +2455,8 @@ func (s *StateDB) FinaliseRWSet() error {
 		return err
 	}
 	// just Finalise rwSet in serial execution
-	return s.mvStates.Finalise(s.txIndex)
+	s.mvStates.AsyncFinalise(s.txIndex)
+	return nil
 }
 
 func (s *StateDB) getStateObjectsDestruct(addr common.Address) (*types.StateAccount, bool) {
