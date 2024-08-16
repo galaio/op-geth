@@ -468,9 +468,10 @@ func (s *MVStates) innerFinalise(index int) error {
 // resolveDepsCacheByWrites must be executed in order
 func (s *MVStates) resolveDepsCacheByWrites(index int, rwSet *RWSet) {
 	// analysis dep, if the previous transaction is not executed/validated, re-analysis is required
-	maker := NewTxDepSlice(0)
+	depSlice := NewTxDepSlice(0)
+	depMap := make(map[uint64]struct{})
 	if rwSet.excludedTx {
-		s.txDepCache = append(s.txDepCache, maker)
+		s.txDepCache = append(s.txDepCache, depSlice)
 		return
 	}
 	// check tx dependency, only check key, skip version
@@ -486,7 +487,11 @@ func (s *MVStates) resolveDepsCacheByWrites(index int, rwSet *RWSet) {
 			}
 			items := writes.FindPrevWrites(index)
 			for _, item := range items {
-				maker.add(uint64(item.TxIndex()))
+				tx := uint64(item.TxIndex())
+				if _, ok := depMap[tx]; !ok {
+					depMap[tx] = struct{}{}
+					depSlice.add(tx)
+				}
 			}
 		}
 	} else {
@@ -500,26 +505,37 @@ func (s *MVStates) resolveDepsCacheByWrites(index int, rwSet *RWSet) {
 			}
 			items := w.FindPrevWrites(index)
 			for _, item := range items {
-				maker.add(uint64(item.TxIndex()))
+				tx := uint64(item.TxIndex())
+				if _, ok := depMap[tx]; !ok {
+					depMap[tx] = struct{}{}
+					depSlice.add(tx)
+				}
 			}
 		}
 	}
 
-	temp := make([]uint64, len(maker.deps()))
-	copy(temp, maker.deps())
-	for _, prev := range temp {
+	for _, prev := range depSlice.deps() {
 		// clear redundancy deps compared with prev
-		maker.diff(s.txDepCache[prev].deps())
+		for _, tx := range s.txDepCache[prev].deps() {
+			if _, ok := depMap[tx]; ok {
+				delete(depMap, tx)
+			}
+		}
 	}
-	s.txDepCache = append(s.txDepCache, maker)
+
+	depSlice = NewTxDepSlice(len(depMap))
+	for k := range depMap {
+		depSlice.add(k)
+	}
+	s.txDepCache = append(s.txDepCache, depSlice)
 }
 
 // resolveDepsCache must be executed in order
 func (s *MVStates) resolveDepsCache(index int, rwSet *RWSet) {
 	// analysis dep, if the previous transaction is not executed/validated, re-analysis is required
-	maker := NewTxDepMap(0)
+	depMap := NewTxDepMap(0)
 	if rwSet.excludedTx {
-		s.txDepCache = append(s.txDepCache, maker)
+		s.txDepCache = append(s.txDepCache, depMap)
 		return
 	}
 	for prev := 0; prev < index; prev++ {
@@ -535,16 +551,16 @@ func (s *MVStates) resolveDepsCache(index int, rwSet *RWSet) {
 		}
 		// check if there has written op before i
 		if checkDependency(prevSet.writeSet, rwSet.readSet) {
-			maker.add(uint64(prev))
+			depMap.add(uint64(prev))
 			// clear redundancy deps compared with prev
-			for _, dep := range maker.deps() {
+			for _, dep := range depMap.deps() {
 				if s.txDepCache[prev].exist(dep) {
-					maker.remove(dep)
+					depMap.remove(dep)
 				}
 			}
 		}
 	}
-	s.txDepCache = append(s.txDepCache, maker)
+	s.txDepCache = append(s.txDepCache, depMap)
 }
 
 // checkRWSetInconsistent a helper function
@@ -642,23 +658,19 @@ type TxDepMaker interface {
 	exist(index uint64) bool
 	deps() []uint64
 	remove(index uint64)
-	diff(prevs []uint64)
 }
 
 type TxDepSlice struct {
 	indexes []uint64
 }
 
-func NewTxDepSlice(cap uint64) *TxDepSlice {
+func NewTxDepSlice(cap int) *TxDepSlice {
 	return &TxDepSlice{
 		indexes: make([]uint64, 0, cap),
 	}
 }
 
 func (m *TxDepSlice) add(index uint64) {
-	if m.exist(index) {
-		return
-	}
 	m.indexes = append(m.indexes, index)
 	for i := len(m.indexes) - 1; i > 0; i-- {
 		if m.indexes[i] < m.indexes[i-1] {
@@ -687,34 +699,6 @@ func (m *TxDepSlice) remove(index uint64) {
 	m.indexes = m.indexes[:len(m.indexes)-1]
 }
 
-func (m *TxDepSlice) diff(prevs []uint64) {
-	var i, j int
-	var dup []uint64
-	for i < len(m.indexes) && j < len(prevs) {
-		if m.indexes[i] > prevs[j] {
-			j++
-		} else if m.indexes[i] < prevs[j] {
-			if dup != nil {
-				dup = append(dup, m.indexes[i])
-			}
-			i++
-		} else {
-			if dup == nil {
-				dup = make([]uint64, i)
-				copy(dup, m.indexes[:i])
-			}
-			i++
-			j++
-		}
-	}
-	if dup != nil {
-		for ; i < len(m.indexes); i++ {
-			dup = append(dup, m.indexes[i])
-		}
-		m.indexes = dup
-	}
-}
-
 type TxDepMap map[uint64]struct{}
 
 func NewTxDepMap(cap int) TxDepMap {
@@ -741,9 +725,6 @@ func (m TxDepMap) deps() []uint64 {
 
 func (m TxDepMap) remove(index uint64) {
 	delete(m, index)
-}
-
-func (m TxDepMap) diff(prevs []uint64) {
 }
 
 func bytes2Str(buf []byte) string {
