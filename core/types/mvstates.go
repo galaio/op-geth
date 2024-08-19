@@ -81,7 +81,7 @@ func (key RWKey) IsStorageState() bool {
 }
 
 func (key RWKey) String() string {
-	return hex.EncodeToString(str2Bytes(string(key)))
+	return hex.EncodeToString([]byte(key))
 }
 
 func (key RWKey) Addr() common.Address {
@@ -742,9 +742,11 @@ func (m TxDepMap) len() int {
 }
 
 func bytes2Str(buf []byte) string {
-	return *(*string)(unsafe.Pointer(&buf))
+	p := unsafe.SliceData(buf)
+	return unsafe.String(p, len(buf))
 }
 
 func str2Bytes(s string) []byte {
-	return *(*[]byte)(unsafe.Pointer(&s))
+	p := unsafe.StringData(s)
+	return unsafe.Slice(p, len(s))
 }
