@@ -1002,6 +1002,14 @@ func (w *worker) generateDAGTx(signer types.Signer, txIndex int, coinbase common
 		return nil, fmt.Errorf("failed to get state db, err: %v", err)
 	}
 
+	// get txDAG data from the stateDB
+	txDAG, err := statedb.ResolveTxDAG(txIndex, []common.Address{coinbase, params.OptimismBaseFeeRecipient, params.OptimismL1FeeRecipient})
+	if txDAG == nil {
+		return nil, err
+	}
+	// txIndex is the index of this txDAG transaction
+	txDAG.SetTxDep(txIndex, types.TxDep{Flags: &types.NonDependentRelFlag})
+
 	if signer == nil {
 		return nil, fmt.Errorf("current signer is nil")
 	}
@@ -1012,14 +1020,6 @@ func (w *worker) generateDAGTx(signer types.Signer, txIndex int, coinbase common
 	if sender == nil {
 		return nil, fmt.Errorf("missing sender private key")
 	}
-
-	// get txDAG data from the stateDB
-	txDAG, err := statedb.ResolveTxDAG(txIndex, []common.Address{coinbase, params.OptimismBaseFeeRecipient, params.OptimismL1FeeRecipient})
-	if txDAG == nil {
-		return nil, err
-	}
-	// txIndex is the index of this txDAG transaction
-	txDAG.SetTxDep(txIndex, types.TxDep{Flags: &types.NonDependentRelFlag})
 
 	publicKey := sender.Public()
 	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
