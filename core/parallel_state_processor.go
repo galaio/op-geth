@@ -150,6 +150,9 @@ func (p *ParallelStateProcessor) init() {
 	go func() {
 		p.runQuickMergeSlotLoop(p.parallelNum-1, parallelPrimarySlot)
 	}()
+	go func() {
+		p.runQuickMergeSlotLoop(p.parallelNum-1, parallelShadowSlot)
+	}()
 
 	p.confirmStage2Chan = make(chan int, 10)
 	go func() {
@@ -564,6 +567,7 @@ func (p *ParallelStateProcessor) runQuickMergeSlotLoop(slotIndex int, slotType i
 		stopChan = curSlot.shadowStopChan
 	}
 	for {
+		start := time.Now()
 		select {
 		case <-stopChan:
 			p.stopSlotChan <- struct{}{}
@@ -580,7 +584,7 @@ func (p *ParallelStateProcessor) runQuickMergeSlotLoop(slotIndex int, slotType i
 		if !atomic.CompareAndSwapInt32(&txReq.runnable, 1, 0) {
 			continue
 		}
-		log.Info("acquire merged next tx", "slot", slotIndex, "tx", txReq.txIndex, "conflict", txReq.conflictIndex.Load(), "txSlot", txReq.staticSlotIndex)
+		log.Info("acquire merged next tx", "slot", slotIndex, "tx", txReq.txIndex, "conflict", txReq.conflictIndex.Load(), "txSlot", txReq.staticSlotIndex, "wait", time.Since(start))
 		res := p.executeInSlot(slotIndex, txReq)
 		if res == nil {
 			continue
@@ -694,7 +698,7 @@ func (p *ParallelStateProcessor) confirmTxResults(statedb *state.StateDB, gp *Ga
 	}
 	p.mergedTxIndex.Store(int32(resultTxIndex))
 
-	log.Info("trigger slot after merge", "slot", result.slotIndex, "tx", result.txReq.txIndex, "conflict", result.txReq.conflictIndex.Load())
+	log.Info("trigger slot after merge", "slot", result.slotIndex, "tx", result.txReq.txIndex, "conflict", result.txReq.conflictIndex.Load(), "conflictCheckDur", conflictCheckDur, "mergeDuration", mergeDuration)
 	// trigger all slot to run left conflicted txs
 	for _, slot := range p.slotState {
 		var wakeupChan chan struct{}
