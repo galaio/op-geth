@@ -120,7 +120,7 @@ func (p *ParallelStateProcessor) init() {
 	p.stopConfirmStage2Chan = make(chan struct{}, 1)
 
 	p.slotState = make([]*SlotState, p.parallelNum)
-	for i := 0; i < p.parallelNum; i++ {
+	for i := 0; i < p.parallelNum-1; i++ {
 		p.slotState[i] = &SlotState{
 			primaryWakeUpChan: make(chan struct{}, 1),
 			shadowWakeUpChan:  make(chan struct{}, 1),
@@ -138,8 +138,18 @@ func (p *ParallelStateProcessor) init() {
 		go func(slotIndex int) {
 			p.runSlotLoop(slotIndex, parallelShadowSlot)
 		}(i)
-
 	}
+
+	// init a quick merge slot
+	p.slotState[p.parallelNum-1] = &SlotState{
+		primaryWakeUpChan: make(chan struct{}, 1),
+		shadowWakeUpChan:  make(chan struct{}, 1),
+		primaryStopChan:   make(chan struct{}, 1),
+		shadowStopChan:    make(chan struct{}, 1),
+	}
+	go func() {
+		p.runQuickMergeSlotLoop(p.parallelNum-1, parallelPrimarySlot)
+	}()
 
 	p.confirmStage2Chan = make(chan int, 10)
 	go func() {
@@ -538,6 +548,44 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 			}
 			p.txResultChan <- res
 		}
+	}
+}
+
+func (p *ParallelStateProcessor) runQuickMergeSlotLoop(slotIndex int, slotType int32) {
+	curSlot := p.slotState[slotIndex]
+	var wakeupChan chan struct{}
+	var stopChan chan struct{}
+
+	if slotType == parallelPrimarySlot {
+		wakeupChan = curSlot.primaryWakeUpChan
+		stopChan = curSlot.primaryStopChan
+	} else {
+		wakeupChan = curSlot.shadowWakeUpChan
+		stopChan = curSlot.shadowStopChan
+	}
+	for {
+		select {
+		case <-stopChan:
+			p.stopSlotChan <- struct{}{}
+			continue
+		case <-wakeupChan:
+		}
+
+		next := int(p.mergedTxIndex.Load()) + 1
+		txReq := p.allTxReqs[next]
+		if txReq.txIndex != next {
+			log.Warn("query next txReq wrong", "slot", slotIndex, "next", next, "actual", txReq.txIndex)
+			continue
+		}
+		if !atomic.CompareAndSwapInt32(&txReq.runnable, 1, 0) {
+			continue
+		}
+		log.Info("acquire merged next tx", "slot", slotIndex, "tx", txReq.txIndex, "conflict", txReq.conflictIndex.Load(), "txSlot", txReq.staticSlotIndex)
+		res := p.executeInSlot(slotIndex, txReq)
+		if res == nil {
+			continue
+		}
+		p.txResultChan <- res
 	}
 }
 
