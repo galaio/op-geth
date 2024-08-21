@@ -340,12 +340,12 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 		// the error could be caused by unconfirmed balance reference,
 		// the balance could insufficient to pay its gas limit, which cause it preCheck.buyGas() failed
 		// redo could solve it.
-		log.Debug("In slot execution error", "error", err,
+		log.Error("In slot execution error", "error", err,
 			"slotIndex", slotIndex, "txIndex", txReq.txIndex)
 	}
 	p.unconfirmedResults.Store(txReq.txIndex, &txResult)
 	executeDur := time.Since(executeStart)
-	log.Debug("ExecuteInSlot", "txIndex", txReq.txIndex,
+	log.Info("ExecuteInSlot", "slot", slotIndex, "txIndex", txReq.txIndex, "txSlot", txReq.staticSlotIndex,
 		"conflictIndex", conflictIndex, "baseIdx", slotDB.BaseTxIndex(),
 		"executeDur", executeDur, "New SlotDB Dur", newSlotDBDur, "prepareDur", prepareDur)
 	return &txResult
@@ -646,6 +646,7 @@ func (p *ParallelStateProcessor) confirmTxResults(statedb *state.StateDB, gp *Ga
 	}
 	p.mergedTxIndex.Store(int32(resultTxIndex))
 
+	log.Info("trigger slot after merge", "slot", result.slotIndex, "tx", result.txReq.txIndex, "conflict", result.txReq.conflictIndex.Load())
 	// trigger all slot to run left conflicted txs
 	for _, slot := range p.slotState {
 		var wakeupChan chan struct{}
