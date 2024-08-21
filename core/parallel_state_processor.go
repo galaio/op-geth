@@ -576,6 +576,9 @@ func (p *ParallelStateProcessor) runQuickMergeSlotLoop(slotIndex int, slotType i
 		}
 
 		next := int(p.mergedTxIndex.Load()) + 1
+		if next >= len(p.allTxReqs) {
+			continue
+		}
 		txReq := p.allTxReqs[next]
 		if txReq.txIndex != next {
 			log.Warn("query next txReq wrong", "slot", slotIndex, "next", next, "actual", txReq.txIndex)
