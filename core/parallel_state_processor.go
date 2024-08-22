@@ -721,8 +721,24 @@ func (p *ParallelStateProcessor) confirmTxResults(statedb *state.StateDB, gp *Ga
 		default:
 		}
 	}
+	trigger := time.Since(start)
+	// schedule prefetch once only when unconfirmedResult is valid
+	if result.err == nil {
+		if _, ok := p.txReqExecuteRecord[resultTxIndex]; !ok {
+			p.txReqExecuteRecord[resultTxIndex] = 0
+			p.txReqExecuteCount++
+			statedb.AddrPrefetch(result.slotDB)
+			if !p.inConfirmStage2 && p.txReqExecuteCount == p.targetStage2Count {
+				p.inConfirmStage2 = true
+			}
+		}
+		p.txReqExecuteRecord[resultTxIndex]++
+	}
+	addrPrefetch := time.Since(start)
+
 	log.Info("trigger slot after merge", "slot", result.slotIndex, "tx", result.txReq.txIndex, "conflict",
-		result.txReq.conflictIndex.Load(), "conflictCheckDur", conflictCheckDur, "mergeDuration", mergeDuration, "trigger", time.Since(start))
+		result.txReq.conflictIndex.Load(), "conflictCheckDur", conflictCheckDur, "mergeDuration", mergeDuration,
+		"addrPrefetch", addrPrefetch, "trigger", trigger)
 	return result, conflictCheckDur, mergeDuration
 }
 
@@ -887,25 +903,14 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		}
 		unconfirmedResult := <-p.txResultChan
 		unconfirmedTxIndex := unconfirmedResult.txReq.txIndex
-		log.Info("receive tx result", "tx", unconfirmedTxIndex, "conflict", unconfirmedResult.txReq.conflictIndex.Load(), "wait", time.Since(start))
+		wait := time.Since(start)
+		start = time.Now()
 		if unconfirmedTxIndex <= int(p.mergedTxIndex.Load()) {
+			log.Info("receive tx result", "tx", unconfirmedTxIndex, "conflict", unconfirmedResult.txReq.conflictIndex.Load(), "wait", wait)
 			log.Debug("drop merged txReq", "unconfirmedTxIndex", unconfirmedTxIndex, "p.mergedTxIndex", p.mergedTxIndex.Load())
 			continue
 		}
 		p.pendingConfirmResults[unconfirmedTxIndex] = append(p.pendingConfirmResults[unconfirmedTxIndex], unconfirmedResult)
-
-		// schedule prefetch once only when unconfirmedResult is valid
-		if unconfirmedResult.err == nil {
-			if _, ok := p.txReqExecuteRecord[unconfirmedTxIndex]; !ok {
-				p.txReqExecuteRecord[unconfirmedTxIndex] = 0
-				p.txReqExecuteCount++
-				statedb.AddrPrefetch(unconfirmedResult.slotDB)
-				if !p.inConfirmStage2 && p.txReqExecuteCount == p.targetStage2Count {
-					p.inConfirmStage2 = true
-				}
-			}
-			p.txReqExecuteRecord[unconfirmedTxIndex]++
-		}
 
 		for {
 			mergeTimeStart := time.Now()
@@ -927,6 +932,8 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			totalConflictCheck += conflictCheckDur
 			totalMergeDBDur += mergeDBDur
 		}
+		log.Info("receive tx result", "tx", unconfirmedTxIndex, "conflict", unconfirmedResult.txReq.conflictIndex.Load(),
+			"wait", wait, "totalMerge", time.Since(start))
 	}
 
 	resultProcessTime := time.Now()
