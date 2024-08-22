@@ -524,7 +524,9 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 			if res == nil {
 				continue
 			}
+			start := time.Now()
 			p.txResultChan <- res
+			log.Info("execute sending", "slot", slotIndex, "tx", txReq.txIndex, "conflict", txReq.conflictIndex.Load(), "txSlot", txReq.staticSlotIndex, "cost", time.Since(start))
 		}
 		// switched to the other slot.
 		if interrupted {
@@ -549,7 +551,9 @@ func (p *ParallelStateProcessor) runSlotLoop(slotIndex int, slotType int32) {
 			if res == nil {
 				continue
 			}
+			start := time.Now()
 			p.txResultChan <- res
+			log.Info("execute sending", "slot", slotIndex, "tx", stealTxReq.txIndex, "conflict", stealTxReq.conflictIndex.Load(), "txSlot", stealTxReq.staticSlotIndex, "cost", time.Since(start))
 		}
 	}
 }
@@ -592,7 +596,9 @@ func (p *ParallelStateProcessor) runQuickMergeSlotLoop(slotIndex int, slotType i
 		if res == nil {
 			continue
 		}
+		start = time.Now()
 		p.txResultChan <- res
+		log.Info("execute sending", "slot", slotIndex, "tx", txReq.txIndex, "conflict", txReq.conflictIndex.Load(), "txSlot", txReq.staticSlotIndex, "cost", time.Since(start))
 	}
 }
 
@@ -701,7 +707,7 @@ func (p *ParallelStateProcessor) confirmTxResults(statedb *state.StateDB, gp *Ga
 	}
 	p.mergedTxIndex.Store(int32(resultTxIndex))
 
-	log.Info("trigger slot after merge", "slot", result.slotIndex, "tx", result.txReq.txIndex, "conflict", result.txReq.conflictIndex.Load(), "conflictCheckDur", conflictCheckDur, "mergeDuration", mergeDuration)
+	start = time.Now()
 	// trigger all slot to run left conflicted txs
 	for _, slot := range p.slotState {
 		var wakeupChan chan struct{}
@@ -715,6 +721,8 @@ func (p *ParallelStateProcessor) confirmTxResults(statedb *state.StateDB, gp *Ga
 		default:
 		}
 	}
+	log.Info("trigger slot after merge", "slot", result.slotIndex, "tx", result.txReq.txIndex, "conflict",
+		result.txReq.conflictIndex.Load(), "conflictCheckDur", conflictCheckDur, "mergeDuration", mergeDuration, "trigger", time.Since(start))
 	return result, conflictCheckDur, mergeDuration
 }
 
@@ -872,12 +880,14 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	var totalMergeDBDur time.Duration = 0
 	// wait until all Txs have processed.
 	for {
+		start := time.Now()
 		if len(commonTxs) == txNum {
 			// put it ahead of chan receive to avoid waiting for empty block
 			break
 		}
 		unconfirmedResult := <-p.txResultChan
 		unconfirmedTxIndex := unconfirmedResult.txReq.txIndex
+		log.Info("receive tx result", "tx", unconfirmedTxIndex, "conflict", unconfirmedResult.txReq.conflictIndex.Load(), "wait", time.Since(start))
 		if unconfirmedTxIndex <= int(p.mergedTxIndex.Load()) {
 			log.Debug("drop merged txReq", "unconfirmedTxIndex", unconfirmedTxIndex, "p.mergedTxIndex", p.mergedTxIndex.Load())
 			continue
