@@ -49,6 +49,15 @@ type ParallelStateProcessor struct {
 	targetStage2Count     int
 	nextStage2TxIndex     int
 	delayGasFee           bool
+
+	enableMixSlot  bool
+	txCnt          int
+	txResMap       *sync.Map
+	pendingTxIndex int
+	pendingTxLock  sync.RWMutex
+	mergeTxIndex   int
+	mergeDone      chan struct{}
+	slotStop       chan struct{}
 }
 
 func newParallelStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consensus.Engine, parallelNum int) *ParallelStateProcessor {
@@ -387,15 +396,19 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 				return nil
 			}
 		} else {
-			// pop one result as target result.
-			results := p.pendingConfirmResults[targetTxIndex]
-			resultsLen := len(results)
-			if resultsLen == 0 { // there is no pending result can be verified, break and wait for incoming results
-				return nil
+			if tmp, ok := p.txResMap.Load(targetTxIndex); ok {
+				targetResult = tmp.(*ParallelTxResult)
+			} else {
+				// pop one result as target result.
+				results := p.pendingConfirmResults[targetTxIndex]
+				resultsLen := len(results)
+				if resultsLen == 0 { // there is no pending result can be verified, break and wait for incoming results
+					return nil
+				}
+				targetResult = results[len(results)-1]
+				// last is the freshest, stack based priority
+				p.pendingConfirmResults[targetTxIndex] = p.pendingConfirmResults[targetTxIndex][:resultsLen-1] // remove from the queue
 			}
-			targetResult = results[len(results)-1]
-			// last is the freshest, stack based priority
-			p.pendingConfirmResults[targetTxIndex] = p.pendingConfirmResults[targetTxIndex][:resultsLen-1] // remove from the queue
 		}
 
 		valid := p.toConfirmTxIndexResult(targetResult, isStage2)
@@ -585,6 +598,78 @@ func (p *ParallelStateProcessor) runQuickMergeSlotLoop(slotIndex int, slotType i
 			}
 			break
 		}
+	}
+}
+
+func (p *ParallelStateProcessor) runMixSlotLoop(slotIndex int) {
+	for {
+		select {
+		case <-p.stopSlotChan:
+			return
+		default:
+		}
+
+		// acquire next pending tx
+		nextPending := -1
+		func() {
+			p.pendingTxLock.Lock()
+			if p.pendingTxIndex < p.txCnt {
+				nextPending = p.pendingTxIndex
+				p.pendingTxIndex++
+			}
+			p.pendingTxLock.Unlock()
+		}()
+
+		// if res is not nil, just skip
+		if _, ok := p.txResMap.Load(nextPending); ok {
+			continue
+		}
+
+		txReq := p.allTxReqs[nextPending]
+		func() {
+			if txReq.txIndex != nextPending {
+				log.Warn("query next txReq wrong", "slot", slotIndex, "next", nextPending, "actual", txReq.txIndex)
+				return
+			}
+			if !atomic.CompareAndSwapInt32(&txReq.runnable, 1, 0) {
+				log.Warn("switch tx req runable fail", "slot", slotIndex, "next", nextPending, "actual", txReq.txIndex)
+				return
+			}
+			res := p.executeInSlot(slotIndex, txReq)
+			if res != nil {
+				p.txResMap.Store(nextPending, res)
+				return
+			}
+			// run fail
+			p.pendingTxLock.Lock()
+			p.pendingTxIndex = nextPending
+			p.pendingTxLock.Unlock()
+		}()
+
+		// run merge
+		nextMerge := -1
+		func() {
+			p.pendingTxLock.Lock()
+			if p.mergeTxIndex < p.pendingTxIndex {
+				nextMerge = p.mergeTxIndex
+				p.mergeTxIndex++
+			}
+			p.pendingTxLock.Unlock()
+		}()
+		func() {
+			res := p.toConfirmTxIndex(nextMerge, false)
+			// merge fail
+			if res == nil {
+				p.pendingTxLock.Lock()
+				p.mergeTxIndex = nextMerge
+				p.pendingTxLock.Unlock()
+			} else {
+				// merge all
+				if nextMerge == p.txCnt-1 {
+					p.mergeDone <- struct{}{}
+				}
+			}
+		}()
 	}
 }
 
@@ -855,49 +940,80 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 	}
 
 	p.delayGasFee = false
-	p.doStaticDispatch(p.allTxReqs)
 	if txDAG != nil && txDAG.DelayGasFeeDistribution() {
 		p.delayGasFee = true
 	}
 
-	// after static dispatch, we notify the slot to work.
-	for _, slot := range p.slotState {
-		slot.primaryWakeUpChan <- struct{}{}
-	}
+	p.enableMixSlot = true
+	if p.enableMixSlot {
+		p.txCnt = len(p.allTxReqs)
+		p.txResMap = new(sync.Map)
+		p.pendingTxIndex = 0
+		p.mergeTxIndex = 0
+		p.mergeDone = make(chan struct{}, 1)
+		p.stopSlotChan = make(chan struct{})
 
-	// wait until all Txs have processed.
-	for {
-		if len(commonTxs) == txNum {
-			// put it ahead of chan receive to avoid waiting for empty block
-			break
+		// start slots
+		for i := 0; i < len(p.slotState); i++ {
+			go p.runMixSlotLoop(i)
 		}
-		unconfirmedResult := <-p.txResultChan
-		unconfirmedTxIndex := unconfirmedResult.txReq.txIndex
-		if unconfirmedTxIndex <= int(p.mergedTxIndex.Load()) {
-			log.Debug("drop merged txReq", "unconfirmedTxIndex", unconfirmedTxIndex, "p.mergedTxIndex", p.mergedTxIndex.Load())
-			continue
-		}
-		p.pendingConfirmResults[unconfirmedTxIndex] = append(p.pendingConfirmResults[unconfirmedTxIndex], unconfirmedResult)
 
+		// wait
+		<-p.mergeDone
+		close(p.stopSlotChan)
+
+		for i := 0; i < p.txCnt; i++ {
+			res, ok := p.txResMap.Load(i)
+			if !ok {
+				log.Error("cannot get res", "index", i)
+				return nil, nil, 0, errors.New("cannot get tx res")
+			}
+			ret := res.(*ParallelTxResult)
+			commonTxs = append(commonTxs, ret.txReq.tx)
+			receipts = append(receipts, ret.receipt)
+		}
+	} else {
+		p.doStaticDispatch(p.allTxReqs)
+
+		// after static dispatch, we notify the slot to work.
+		for _, slot := range p.slotState {
+			slot.primaryWakeUpChan <- struct{}{}
+		}
+
+		// wait until all Txs have processed.
 		for {
-			result := p.confirmTxResults(statedb, gp)
-			if result == nil {
+			if len(commonTxs) == txNum {
+				// put it ahead of chan receive to avoid waiting for empty block
 				break
 			}
-			// update tx result
-			if result.err != nil {
-				log.Error("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
-					"resultTxIndex", result.txReq.txIndex, "result.err", result.err)
-				p.doCleanUp()
-				return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txReq.txIndex, result.txReq.tx.Hash().Hex(), result.err)
+			unconfirmedResult := <-p.txResultChan
+			unconfirmedTxIndex := unconfirmedResult.txReq.txIndex
+			if unconfirmedTxIndex <= int(p.mergedTxIndex.Load()) {
+				log.Debug("drop merged txReq", "unconfirmedTxIndex", unconfirmedTxIndex, "p.mergedTxIndex", p.mergedTxIndex.Load())
+				continue
 			}
-			commonTxs = append(commonTxs, result.txReq.tx)
-			receipts = append(receipts, result.receipt)
-		}
-	}
+			p.pendingConfirmResults[unconfirmedTxIndex] = append(p.pendingConfirmResults[unconfirmedTxIndex], unconfirmedResult)
 
-	// clean up when the block is processed
-	p.doCleanUp()
+			for {
+				result := p.confirmTxResults(statedb, gp)
+				if result == nil {
+					break
+				}
+				// update tx result
+				if result.err != nil {
+					log.Error("ProcessParallel a failed tx", "resultSlotIndex", result.slotIndex,
+						"resultTxIndex", result.txReq.txIndex, "result.err", result.err)
+					p.doCleanUp()
+					return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", result.txReq.txIndex, result.txReq.tx.Hash().Hex(), result.err)
+				}
+				commonTxs = append(commonTxs, result.txReq.tx)
+				receipts = append(receipts, result.receipt)
+			}
+		}
+
+		// clean up when the block is processed
+		p.doCleanUp()
+	}
 
 	// len(commonTxs) could be 0, such as: https://bscscan.com/block/14580486
 	if len(commonTxs) > 0 && p.debugConflictRedoNum > 0 {
