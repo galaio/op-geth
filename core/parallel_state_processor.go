@@ -641,7 +641,7 @@ func (p *ParallelStateProcessor) runMixSlotLoop(slotIndex int) {
 				}
 				// run fail
 				p.pendingTxLock.Lock()
-				p.pendingTxIndex = nextPending
+				p.pendingTxIndex = min(nextPending, p.pendingTxIndex)
 				p.pendingTxLock.Unlock()
 			}()
 		}
@@ -967,8 +967,8 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 							log.Info("acquire next merge tx", "slot", -1, "tx", nextMerge, "res.err", res.err)
 						}
 						p.pendingTxLock.Lock()
-						p.mergeTxIndex = nextMerge
-						p.pendingTxIndex = nextMerge
+						p.mergeTxIndex = min(nextMerge, p.mergeTxIndex)
+						p.pendingTxIndex = min(nextMerge, p.pendingTxIndex)
 						p.txResMap.Delete(nextMerge)
 						p.pendingTxLock.Unlock()
 					} else {
