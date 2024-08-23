@@ -633,8 +633,8 @@ func (p *ParallelStateProcessor) runMixSlotLoop(slotIndex int) {
 			txReq := p.allTxReqs[nextPending]
 			func() {
 				res := p.executeInSlot(slotIndex, txReq)
-				log.Info("acquire next pending tx", "slot", slotIndex, "tx", nextPending,
-					"conflict", txReq.conflictIndex.Load(), "mergeIndex", p.mergedTxIndex.Load(), "res", res != nil)
+				//log.Info("acquire next pending tx", "slot", slotIndex, "tx", nextPending,
+				//"conflict", txReq.conflictIndex.Load(), "mergeIndex", p.mergedTxIndex.Load(), "res", res != nil)
 				if res != nil {
 					p.txResMap.LoadOrStore(nextPending, res)
 					return
@@ -948,7 +948,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 				// inc next merge index and got res
 				if p.mergeTxIndex < p.pendingTxIndex {
 					_, ok := p.txResMap.Load(p.mergeTxIndex)
-					log.Info("acquire next merge tx", "slot", -1, "p.mergeTxIndex", p.mergeTxIndex, "p.pendingTxIndex", p.pendingTxIndex, "nextRes", ok)
+					//log.Info("acquire next merge tx", "slot", -1, "p.mergeTxIndex", p.mergeTxIndex, "p.pendingTxIndex", p.pendingTxIndex, "nextRes", ok)
 					if ok {
 						nextMerge = p.mergeTxIndex
 						p.mergeTxIndex++
@@ -959,7 +959,7 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			if nextMerge >= 0 {
 				func() {
 					res := p.toConfirmTxIndex(nextMerge, false)
-					log.Info("acquire next merge tx", "slot", -1, "tx", nextMerge, "res", res != nil)
+					//log.Info("acquire next merge tx", "slot", -1, "tx", nextMerge, "res", res != nil)
 					// merge fail
 					if res == nil || res.err != nil {
 						//if res != nil && res.err != nil {
