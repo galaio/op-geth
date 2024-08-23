@@ -938,7 +938,6 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 		for {
 			select {
 			case <-p.mergeDone:
-				log.Info("break merge loop")
 				break LOOP
 			default:
 			}
@@ -963,9 +962,9 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 					log.Info("acquire next merge tx", "slot", -1, "tx", nextMerge, "res", res != nil)
 					// merge fail
 					if res == nil || res.err != nil {
-						if res != nil && res.err != nil {
-							log.Info("acquire next merge tx", "slot", -1, "tx", nextMerge, "res.err", res.err)
-						}
+						//if res != nil && res.err != nil {
+						//	log.Info("acquire next merge tx", "slot", -1, "tx", nextMerge, "res.err", res.err)
+						//}
 						p.pendingTxLock.Lock()
 						p.mergeTxIndex = min(nextMerge, p.mergeTxIndex)
 						p.pendingTxIndex = min(nextMerge, p.pendingTxIndex)
@@ -975,7 +974,6 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 						p.mergedTxIndex.Store(int32(nextMerge))
 						p.txResMap.Store(nextMerge, res)
 						result := res
-						log.Debug("merge to maindb", "tx", nextMerge)
 						if err := gp.SubGas(result.receipt.GasUsed); err != nil {
 							log.Error("gas limit reached", "block", result.txReq.block.Number(),
 								"txIndex", result.txReq.txIndex, "GasUsed", result.receipt.GasUsed, "gp.Gas", gp.Gas())
