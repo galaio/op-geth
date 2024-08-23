@@ -3,11 +3,6 @@ package core
 import (
 	"errors"
 	"fmt"
-	"github.com/ethereum/go-ethereum/metrics"
-	"runtime"
-	"sync"
-	"sync/atomic"
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc"
@@ -16,7 +11,11 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
+	"runtime"
+	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -367,6 +366,9 @@ func (p *ParallelStateProcessor) executeInSlot(slotIndex int, txReq *ParallelTxR
 
 // toConfirmTxIndex confirm a serial TxResults with same txIndex
 func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bool) *ParallelTxResult {
+	if _, ok := p.txResMap.Load(targetTxIndex); !ok {
+		return nil
+	}
 	if isStage2 {
 		if targetTxIndex <= int(p.mergedTxIndex.Load())+1 {
 			// `p.mergedTxIndex+1` is the one to be merged,
@@ -452,7 +454,9 @@ func (p *ParallelStateProcessor) toConfirmTxIndex(targetTxIndex int, isStage2 bo
 				atomic.CompareAndSwapInt32(&targetResult.txReq.runnable, 0, 1) // needs redo
 				p.debugConflictRedoNum++
 				// interrupt its current routine, and switch to the other routine
-				p.switchSlot(staticSlotIndex)
+				if staticSlotIndex >= 0 {
+					p.switchSlot(staticSlotIndex)
+				}
 				return nil
 			}
 			continue
@@ -620,56 +624,27 @@ func (p *ParallelStateProcessor) runMixSlotLoop(slotIndex int) {
 			p.pendingTxLock.Unlock()
 		}()
 
-		// if res is not nil, just skip
-		if _, ok := p.txResMap.Load(nextPending); ok {
-			continue
-		}
+		if nextPending >= 0 {
+			// if res is not nil, just skip
+			if _, ok := p.txResMap.Load(nextPending); ok {
+				continue
+			}
 
-		txReq := p.allTxReqs[nextPending]
-		func() {
-			if txReq.txIndex != nextPending {
-				log.Warn("query next txReq wrong", "slot", slotIndex, "next", nextPending, "actual", txReq.txIndex)
-				return
-			}
-			if !atomic.CompareAndSwapInt32(&txReq.runnable, 1, 0) {
-				log.Warn("switch tx req runable fail", "slot", slotIndex, "next", nextPending, "actual", txReq.txIndex)
-				return
-			}
-			res := p.executeInSlot(slotIndex, txReq)
-			if res != nil {
-				p.txResMap.Store(nextPending, res)
-				return
-			}
-			// run fail
-			p.pendingTxLock.Lock()
-			p.pendingTxIndex = nextPending
-			p.pendingTxLock.Unlock()
-		}()
-
-		// run merge
-		nextMerge := -1
-		func() {
-			p.pendingTxLock.Lock()
-			if p.mergeTxIndex < p.pendingTxIndex {
-				nextMerge = p.mergeTxIndex
-				p.mergeTxIndex++
-			}
-			p.pendingTxLock.Unlock()
-		}()
-		func() {
-			res := p.toConfirmTxIndex(nextMerge, false)
-			// merge fail
-			if res == nil {
-				p.pendingTxLock.Lock()
-				p.mergeTxIndex = nextMerge
-				p.pendingTxLock.Unlock()
-			} else {
-				// merge all
-				if nextMerge == p.txCnt-1 {
-					p.mergeDone <- struct{}{}
+			txReq := p.allTxReqs[nextPending]
+			func() {
+				res := p.executeInSlot(slotIndex, txReq)
+				log.Info("acquire next pending tx", "slot", slotIndex, "tx", nextPending,
+					"conflict", txReq.conflictIndex.Load(), "mergeIndex", p.mergedTxIndex.Load(), "res", res != nil)
+				if res != nil {
+					p.txResMap.LoadOrStore(nextPending, res)
+					return
 				}
-			}
-		}()
+				// run fail
+				p.pendingTxLock.Lock()
+				p.pendingTxIndex = nextPending
+				p.pendingTxLock.Unlock()
+			}()
+		}
 	}
 }
 
@@ -958,20 +933,108 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			go p.runMixSlotLoop(i)
 		}
 
-		// wait
-		<-p.mergeDone
-		close(p.stopSlotChan)
-
-		for i := 0; i < p.txCnt; i++ {
-			res, ok := p.txResMap.Load(i)
-			if !ok {
-				log.Error("cannot get res", "index", i)
-				return nil, nil, 0, errors.New("cannot get tx res")
+		// merge loop
+	LOOP:
+		for {
+			select {
+			case <-p.mergeDone:
+				log.Info("break merge loop")
+				break LOOP
+			default:
 			}
-			ret := res.(*ParallelTxResult)
-			commonTxs = append(commonTxs, ret.txReq.tx)
-			receipts = append(receipts, ret.receipt)
+			// run merge, confirm cannot run concurrently!!! and must merge in advance to avoid conflict
+			nextMerge := -1
+			func() {
+				p.pendingTxLock.Lock()
+				// inc next merge index and got res
+				if p.mergeTxIndex < p.pendingTxIndex {
+					_, ok := p.txResMap.Load(p.mergeTxIndex)
+					log.Info("acquire next merge tx", "slot", -1, "p.mergeTxIndex", p.mergeTxIndex, "p.pendingTxIndex", p.pendingTxIndex, "nextRes", ok)
+					if ok {
+						nextMerge = p.mergeTxIndex
+						p.mergeTxIndex++
+					}
+				}
+				p.pendingTxLock.Unlock()
+			}()
+			if nextMerge >= 0 {
+				func() {
+					res := p.toConfirmTxIndex(nextMerge, false)
+					log.Info("acquire next merge tx", "slot", -1, "tx", nextMerge, "res", res != nil)
+					// merge fail
+					if res == nil || res.err != nil {
+						if res != nil && res.err != nil {
+							log.Info("acquire next merge tx", "slot", -1, "tx", nextMerge, "res.err", res.err)
+						}
+						p.pendingTxLock.Lock()
+						p.mergeTxIndex = nextMerge
+						p.pendingTxIndex = nextMerge
+						p.txResMap.Delete(nextMerge)
+						p.pendingTxLock.Unlock()
+					} else {
+						p.mergedTxIndex.Store(int32(nextMerge))
+						p.txResMap.Store(nextMerge, res)
+						result := res
+						log.Debug("merge to maindb", "tx", nextMerge)
+						if err := gp.SubGas(result.receipt.GasUsed); err != nil {
+							log.Error("gas limit reached", "block", result.txReq.block.Number(),
+								"txIndex", result.txReq.txIndex, "GasUsed", result.receipt.GasUsed, "gp.Gas", gp.Gas())
+						}
+
+						resultTxIndex := result.txReq.txIndex
+						var root []byte
+						isByzantium := p.config.IsByzantium(header.Number)
+						isEIP158 := p.config.IsEIP158(header.Number)
+						result.slotDB.FinaliseForParallel(isByzantium || isEIP158, statedb)
+
+						// merge slotDB into mainDB
+						statedb.MergeSlotDB(result.slotDB, result.receipt, resultTxIndex, result.result.delayFees)
+
+						delayGasFee := result.result.delayFees
+						// add delayed gas fee
+						if delayGasFee != nil {
+							if delayGasFee.TipFee != nil {
+								statedb.AddBalance(delayGasFee.Coinbase, delayGasFee.TipFee)
+							}
+							if delayGasFee.BaseFee != nil {
+								statedb.AddBalance(params.OptimismBaseFeeRecipient, delayGasFee.BaseFee)
+							}
+							if delayGasFee.L1Fee != nil {
+								statedb.AddBalance(params.OptimismL1FeeRecipient, delayGasFee.L1Fee)
+							}
+						}
+
+						// Do IntermediateRoot after mergeSlotDB.
+						if !isByzantium {
+							root = statedb.IntermediateRoot(isEIP158).Bytes()
+						}
+						result.receipt.PostState = root
+						// schedule prefetch once only when unconfirmedResult is valid
+						if result.err == nil {
+							if _, ok := p.txReqExecuteRecord[resultTxIndex]; !ok {
+								p.txReqExecuteRecord[resultTxIndex] = 0
+								p.txReqExecuteCount++
+								statedb.AddrPrefetch(result.slotDB)
+								if !p.inConfirmStage2 && p.txReqExecuteCount == p.targetStage2Count {
+									p.inConfirmStage2 = true
+								}
+							}
+							p.txReqExecuteRecord[resultTxIndex]++
+						}
+						commonTxs = append(commonTxs, result.txReq.tx)
+						receipts = append(receipts, result.receipt)
+
+						// merge all
+						if nextMerge == p.txCnt-1 {
+							p.mergeDone <- struct{}{}
+						}
+					}
+				}()
+			}
 		}
+
+		// wait
+		close(p.stopSlotChan)
 	} else {
 		p.doStaticDispatch(p.allTxReqs)
 
