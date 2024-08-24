@@ -616,6 +616,13 @@ func (p *ParallelStateProcessor) runMixSlotLoop(slotIndex int) {
 		// acquire next pending tx
 		nextPending := -1
 		func() {
+			p.pendingTxLock.RLock()
+			if p.pendingTxIndex >= p.txCnt {
+				p.pendingTxLock.RUnlock()
+				return
+			}
+			p.pendingTxLock.RUnlock()
+
 			p.pendingTxLock.Lock()
 			if p.pendingTxIndex < p.txCnt {
 				nextPending = p.pendingTxIndex
@@ -944,9 +951,12 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 			// run merge, confirm cannot run concurrently!!! and must merge in advance to avoid conflict
 			nextMerge := -1
 			func() {
-				p.pendingTxLock.Lock()
+				p.pendingTxLock.RLock()
+				beforePending := p.pendingTxIndex
+				p.pendingTxLock.RUnlock()
+
 				// inc next merge index and got res
-				if p.mergeTxIndex < p.pendingTxIndex {
+				if p.mergeTxIndex < beforePending {
 					_, ok := p.txResMap.Load(p.mergeTxIndex)
 					//log.Info("acquire next merge tx", "slot", -1, "p.mergeTxIndex", p.mergeTxIndex, "p.pendingTxIndex", p.pendingTxIndex, "nextRes", ok)
 					if ok {
@@ -954,7 +964,6 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 						p.mergeTxIndex++
 					}
 				}
-				p.pendingTxLock.Unlock()
 			}()
 			if nextMerge >= 0 {
 				func() {
@@ -965,10 +974,10 @@ func (p *ParallelStateProcessor) Process(block *types.Block, statedb *state.Stat
 						//if res != nil && res.err != nil {
 						//	log.Info("acquire next merge tx", "slot", -1, "tx", nextMerge, "res.err", res.err)
 						//}
-						p.pendingTxLock.Lock()
-						p.mergeTxIndex = min(nextMerge, p.mergeTxIndex)
-						p.pendingTxIndex = min(nextMerge, p.pendingTxIndex)
 						p.txResMap.Delete(nextMerge)
+						p.mergeTxIndex = min(nextMerge, p.mergeTxIndex)
+						p.pendingTxLock.Lock()
+						p.pendingTxIndex = min(nextMerge, p.pendingTxIndex)
 						p.pendingTxLock.Unlock()
 					} else {
 						p.mergedTxIndex.Store(int32(nextMerge))
