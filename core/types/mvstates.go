@@ -33,7 +33,7 @@ const (
 )
 
 const (
-	asyncDepGenChanSize = 30000
+	asyncDepGenChanSize = 1000
 )
 
 func AccountStateKey(account common.Address, state AccountState) RWKey {
