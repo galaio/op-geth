@@ -330,7 +330,11 @@ func NewMVStates(txCount int) *MVStates {
 func (s *MVStates) EnableAsyncGen() *MVStates {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	s.asyncGenChan = make(chan int, asyncDepGenChanSize)
+	chanSize := asyncDepGenChanSize
+	if len(s.rwSets) > 0 {
+		chanSize = len(s.rwSets)
+	}
+	s.asyncGenChan = make(chan int, chanSize)
 	s.asyncStopChan = make(chan struct{})
 	s.asyncRunning = true
 	go s.asyncGenLoop()
