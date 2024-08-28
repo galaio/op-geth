@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
-	"github.com/ethereum/go-ethereum/common"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/cometbft/cometbft/libs/rand"
 	"github.com/golang/snappy"
@@ -17,7 +19,7 @@ import (
 
 const (
 	mockRWSetSize = 5000
-	mockKeySize   = 64
+	mockKeySize   = 1000
 )
 
 func TestMVStates_BasicUsage(t *testing.T) {
@@ -115,15 +117,20 @@ func TestMVStates_ResolveTxDAG_Compare(t *testing.T) {
 	rwSets := mockRandomRWSet(txCnt)
 	ms1 := NewMVStates(txCnt)
 	ms2 := NewMVStates(txCnt)
+	ms3 := NewMVStates(txCnt)
 	for i, rwSet := range rwSets {
 		ms1.rwSets[i] = rwSet
 		ms2.rwSets[i] = rwSet
 		require.NoError(t, ms2.Finalise(i))
+		ms3.rwSets[i] = rwSet
+		require.NoError(t, ms3.Finalise(i))
 	}
 
 	d1 := resolveTxDAGInMVStates(ms1)
 	d2 := resolveTxDAGByWritesInMVStates(ms2)
+	d3 := resolveDepsMapCacheByWritesInMVStates(ms3)
 	require.Equal(t, d1.(*PlainTxDAG).String(), d2.(*PlainTxDAG).String())
+	require.Equal(t, d1.(*PlainTxDAG).String(), d3.(*PlainTxDAG).String())
 }
 
 func TestMVStates_TxDAG_Compression(t *testing.T) {
@@ -182,6 +189,18 @@ func BenchmarkResolveTxDAGByWritesInMVStates(b *testing.B) {
 	}
 }
 
+func BenchmarkResolveTxDAGDepsMapCacheByWritesInMVStates(b *testing.B) {
+	rwSets := mockRandomRWSet(mockRWSetSize)
+	ms1 := NewMVStates(mockRWSetSize)
+	for i, rwSet := range rwSets {
+		ms1.rwSets[i] = rwSet
+		ms1.innerFinalise(i)
+	}
+	for i := 0; i < b.N; i++ {
+		resolveDepsMapCacheByWritesInMVStates(ms1)
+	}
+}
+
 func BenchmarkMVStates_Finalise(b *testing.B) {
 	rwSets := mockRandomRWSet(mockRWSetSize)
 	ms1 := NewMVStates(mockRWSetSize)
@@ -206,6 +225,15 @@ func resolveTxDAGByWritesInMVStates(s *MVStates) TxDAG {
 	txDAG := NewPlainTxDAG(len(s.rwSets))
 	for i := 0; i < len(s.rwSets); i++ {
 		s.resolveDepsCacheByWrites(i, s.rwSets[i])
+		txDAG.TxDeps[i].TxIndexes = s.txDepCache[i].deps()
+	}
+	return txDAG
+}
+
+func resolveDepsMapCacheByWritesInMVStates(s *MVStates) TxDAG {
+	txDAG := NewPlainTxDAG(len(s.rwSets))
+	for i := 0; i < len(s.rwSets); i++ {
+		s.resolveDepsMapCacheByWrites(i, s.rwSets[i])
 		txDAG.TxDeps[i].TxIndexes = s.txDepCache[i].deps()
 	}
 	return txDAG
@@ -264,85 +292,85 @@ func TestIsEqualRWVal(t *testing.T) {
 		isEqual  bool
 	}{
 		{
-			key:      AccountStateKey(mockAddr, AccountNonce),
+			key:      AccountStateKey(nil, mockAddr, AccountNonce),
 			src:      uint64(0),
 			compared: uint64(0),
 			isEqual:  true,
 		},
 		{
-			key:      AccountStateKey(mockAddr, AccountNonce),
+			key:      AccountStateKey(nil, mockAddr, AccountNonce),
 			src:      uint64(0),
 			compared: uint64(1),
 			isEqual:  false,
 		},
 		{
-			key:      AccountStateKey(mockAddr, AccountBalance),
+			key:      AccountStateKey(nil, mockAddr, AccountBalance),
 			src:      new(uint256.Int).SetUint64(1),
 			compared: new(uint256.Int).SetUint64(1),
 			isEqual:  true,
 		},
 		{
-			key:      AccountStateKey(mockAddr, AccountBalance),
+			key:      AccountStateKey(nil, mockAddr, AccountBalance),
 			src:      nil,
 			compared: new(uint256.Int).SetUint64(1),
 			isEqual:  false,
 		},
 		{
-			key:      AccountStateKey(mockAddr, AccountBalance),
+			key:      AccountStateKey(nil, mockAddr, AccountBalance),
 			src:      (*uint256.Int)(nil),
 			compared: new(uint256.Int).SetUint64(1),
 			isEqual:  false,
 		},
 		{
-			key:      AccountStateKey(mockAddr, AccountBalance),
+			key:      AccountStateKey(nil, mockAddr, AccountBalance),
 			src:      (*uint256.Int)(nil),
 			compared: (*uint256.Int)(nil),
 			isEqual:  true,
 		},
 		{
-			key:      AccountStateKey(mockAddr, AccountCodeHash),
+			key:      AccountStateKey(nil, mockAddr, AccountCodeHash),
 			src:      []byte{1},
 			compared: []byte{1},
 			isEqual:  true,
 		},
 		{
-			key:      AccountStateKey(mockAddr, AccountCodeHash),
+			key:      AccountStateKey(nil, mockAddr, AccountCodeHash),
 			src:      nil,
 			compared: []byte{1},
 			isEqual:  false,
 		},
 		{
-			key:      AccountStateKey(mockAddr, AccountCodeHash),
+			key:      AccountStateKey(nil, mockAddr, AccountCodeHash),
 			src:      ([]byte)(nil),
 			compared: []byte{1},
 			isEqual:  false,
 		},
 		{
-			key:      AccountStateKey(mockAddr, AccountCodeHash),
+			key:      AccountStateKey(nil, mockAddr, AccountCodeHash),
 			src:      ([]byte)(nil),
 			compared: ([]byte)(nil),
 			isEqual:  true,
 		},
 		{
-			key:      AccountStateKey(mockAddr, AccountSuicide),
+			key:      AccountStateKey(nil, mockAddr, AccountSuicide),
 			src:      struct{}{},
 			compared: struct{}{},
 			isEqual:  false,
 		},
 		{
-			key:      AccountStateKey(mockAddr, AccountSuicide),
+			key:      AccountStateKey(nil, mockAddr, AccountSuicide),
 			src:      nil,
 			compared: struct{}{},
 			isEqual:  false,
 		},
 		{
-			key:      StorageStateKey(mockAddr, mockHash),
+			key:      StorageStateKey(nil, mockAddr, mockHash),
 			src:      mockHash,
 			compared: mockHash,
 			isEqual:  true,
 		},
 		{
-			key:      StorageStateKey(mockAddr, mockHash),
+			key:      StorageStateKey(nil, mockAddr, mockHash),
 			src:      nil,
 			compared: mockHash,
 			isEqual:  false,
@@ -364,6 +392,7 @@ func BenchmarkTxDepSlice(b *testing.B) {
 			}
 			t.add(src[j])
 		}
+		t.deps()
 	}
 }
 
@@ -377,6 +406,59 @@ func BenchmarkTxDepMap(b *testing.B) {
 			}
 			t.add(src[j])
 		}
+		t.deps()
+	}
+}
+
+func BenchmarkTxDepTreeMap(b *testing.B) {
+	src := mockUintSlice(mockKeySize)
+	for i := 0; i < b.N; i++ {
+		t := NewTxDepTreeMap()
+		for j := 0; j < len(src); j++ {
+			if t.exist(src[j]) {
+				continue
+			}
+			t.add(src[j])
+		}
+		t.deps()
+	}
+}
+
+func BenchmarkMapPointer(b *testing.B) {
+	m := make(map[int]*RWItem)
+	for i := 0; i < b.N; i++ {
+		m[i] = &RWItem{
+			Ver: StateVersion{},
+			Val: i,
+		}
+	}
+}
+
+func BenchmarkMapStruct(b *testing.B) {
+	m := make(map[int]RWItem)
+	for i := 0; i < b.N; i++ {
+		m[i] = RWItem{
+			Ver: StateVersion{},
+			Val: i,
+		}
+	}
+}
+
+func BenchmarkMapExistPut(b *testing.B) {
+	m := make(map[int]interface{})
+	for i := 0; i < b.N; i++ {
+		num := rand.Int() % 1000
+		if _, ok := m[num]; !ok {
+			m[num] = num
+		}
+	}
+}
+
+func BenchmarkSyncMapExistPut(b *testing.B) {
+	m := sync.Map{}
+	for i := 0; i < b.N; i++ {
+		num := rand.Int() % 1000
+		m.LoadOrStore(num, num)
 	}
 }
 
@@ -386,13 +468,13 @@ func mockRWSet(index int, read []string, write []string) *RWSet {
 	}
 	set := NewRWSet(ver)
 	for _, k := range read {
-		set.readSet[str2key(k)] = &RWItem{
+		set.readSet[str2key(k)] = RWItem{
 			Ver: ver,
 			Val: struct{}{},
 		}
 	}
 	for _, k := range write {
-		set.writeSet[str2key(k)] = &RWItem{
+		set.writeSet[str2key(k)] = RWItem{
 			Ver: ver,
 			Val: struct{}{},
 		}
@@ -423,7 +505,7 @@ func mockRWSetWithVal(index int, read []interface{}, write []interface{}) *RWSet
 	}
 
 	for i := 0; i < len(read); {
-		set.readSet[str2key(read[i].(string))] = &RWItem{
+		set.readSet[str2key(read[i].(string))] = RWItem{
 			Ver: StateVersion{
 				TxIndex: index - 1,
 			},
@@ -432,7 +514,7 @@ func mockRWSetWithVal(index int, read []interface{}, write []interface{}) *RWSet
 		i += 2
 	}
 	for i := 0; i < len(write); {
-		set.writeSet[str2key(write[i].(string))] = &RWItem{
+		set.writeSet[str2key(write[i].(string))] = RWItem{
 			Ver: ver,
 			Val: write[i+1],
 		}

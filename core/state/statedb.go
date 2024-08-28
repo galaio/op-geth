@@ -489,7 +489,7 @@ func (s *StateDB) Empty(addr common.Address) bool {
 // GetBalance retrieves the balance from the given address or 0 if object not found
 func (s *StateDB) GetBalance(addr common.Address) (ret *big.Int) {
 	defer func() {
-		s.RecordRead(types.AccountStateKey(addr, types.AccountBalance), ret)
+		s.RecordAccountRead(addr, types.AccountBalance, ret)
 	}()
 
 	object := s.getStateObject(addr)
@@ -503,7 +503,7 @@ func (s *StateDB) GetBalance(addr common.Address) (ret *big.Int) {
 // GetNonce retrieves the nonce from the given address or 0 if object not found
 func (s *StateDB) GetNonce(addr common.Address) (ret uint64) {
 	defer func() {
-		s.RecordRead(types.AccountStateKey(addr, types.AccountNonce), ret)
+		s.RecordAccountRead(addr, types.AccountNonce, ret)
 	}()
 	object := s.getStateObject(addr)
 	if object != nil {
@@ -534,7 +534,7 @@ func (s *StateDB) BaseTxIndex() int {
 
 func (s *StateDB) GetCode(addr common.Address) []byte {
 	defer func() {
-		s.RecordRead(types.AccountStateKey(addr, types.AccountCodeHash), s.GetCodeHash(addr))
+		s.RecordAccountRead(addr, types.AccountCodeHash, s.GetCodeHash(addr))
 	}()
 	object := s.getStateObject(addr)
 	if object != nil {
@@ -545,7 +545,7 @@ func (s *StateDB) GetCode(addr common.Address) []byte {
 
 func (s *StateDB) GetCodeSize(addr common.Address) int {
 	defer func() {
-		s.RecordRead(types.AccountStateKey(addr, types.AccountCodeHash), s.GetCodeHash(addr))
+		s.RecordAccountRead(addr, types.AccountCodeHash, s.GetCodeHash(addr))
 	}()
 	object := s.getStateObject(addr)
 	if object != nil {
@@ -560,7 +560,7 @@ func (s *StateDB) GetCodeSize(addr common.Address) int {
 //   - others:        the address exist, and code is not empty
 func (s *StateDB) GetCodeHash(addr common.Address) (ret common.Hash) {
 	defer func() {
-		s.RecordRead(types.AccountStateKey(addr, types.AccountCodeHash), ret.Bytes())
+		s.RecordAccountRead(addr, types.AccountCodeHash, ret.Bytes())
 	}()
 	object := s.getStateObject(addr)
 	if object == nil {
@@ -572,7 +572,7 @@ func (s *StateDB) GetCodeHash(addr common.Address) (ret common.Hash) {
 // GetState retrieves a value from the given account's storage trie.
 func (s *StateDB) GetState(addr common.Address, hash common.Hash) (ret common.Hash) {
 	defer func() {
-		s.RecordRead(types.StorageStateKey(addr, hash), ret)
+		s.RecordStorageRead(addr, hash, ret)
 	}()
 	object := s.getStateObject(addr)
 	if object != nil {
@@ -584,7 +584,7 @@ func (s *StateDB) GetState(addr common.Address, hash common.Hash) (ret common.Ha
 // GetCommittedState retrieves a value from the given account's committed storage trie.
 func (s *StateDB) GetCommittedState(addr common.Address, hash common.Hash) (ret common.Hash) {
 	defer func() {
-		s.RecordRead(types.StorageStateKey(addr, hash), ret)
+		s.RecordStorageRead(addr, hash, ret)
 	}()
 	object := s.getStateObject(addr)
 	if object != nil {
@@ -614,22 +614,22 @@ func (s *StateDB) HasSelfDestructed(addr common.Address) bool {
 func (s *StateDB) AddBalance(addr common.Address, amount *big.Int) {
 	object := s.GetOrNewStateObject(addr)
 	if object != nil {
-		s.RecordRead(types.AccountStateKey(addr, types.AccountBalance), object.Balance())
+		s.RecordAccountRead(addr, types.AccountBalance, object.Balance())
 		object.AddBalance(amount)
 		return
 	}
-	s.RecordRead(types.AccountStateKey(addr, types.AccountBalance), common.Big0)
+	s.RecordAccountRead(addr, types.AccountBalance, common.Big0)
 }
 
 // SubBalance subtracts amount from the account associated with addr.
 func (s *StateDB) SubBalance(addr common.Address, amount *big.Int) {
 	object := s.GetOrNewStateObject(addr)
 	if object != nil {
-		s.RecordRead(types.AccountStateKey(addr, types.AccountBalance), object.Balance())
+		s.RecordAccountRead(addr, types.AccountBalance, object.Balance())
 		object.SubBalance(amount)
 		return
 	}
-	s.RecordRead(types.AccountStateKey(addr, types.AccountBalance), common.Big0)
+	s.RecordAccountRead(addr, types.AccountBalance, common.Big0)
 }
 
 func (s *StateDB) SetBalance(addr common.Address, amount *big.Int) {
@@ -954,7 +954,7 @@ func (s *StateDB) getStateObjectFromSnapshotOrTrie(addr common.Address) (data *t
 // flag set. This is needed by the state journal to revert to the correct s-
 // destructed object instead of wiping all knowledge about the state object.
 func (s *StateDB) getDeletedStateObject(addr common.Address) *stateObject {
-	s.RecordRead(types.AccountStateKey(addr, types.AccountSelf), struct{}{})
+	s.RecordAccountRead(addr, types.AccountSelf, struct{}{})
 
 	// Prefer live objects if any is available
 	if obj, _ := s.getStateObjectFromStateObjects(addr); obj != nil {
@@ -2334,7 +2334,6 @@ func (s *StateDB) BeforeTxTransition() {
 	if s.isParallel && s.parallel.isSlotDB {
 		return
 	}
-	log.Debug("BeforeTxTransition", "mvStates", s.mvStates == nil, "rwSet", s.rwSet == nil)
 	if s.mvStates == nil {
 		return
 	}
@@ -2372,26 +2371,48 @@ func (s *StateDB) StopTxStat(usedGas uint64) {
 	}
 }
 
-func (s *StateDB) RecordRead(key types.RWKey, val interface{}) {
+func (s *StateDB) RecordAccountRead(addr common.Address, state types.AccountState, val interface{}) {
 	if s.isParallel && s.parallel.isSlotDB {
 		return
 	}
 	if s.rwSet == nil {
 		return
 	}
-	s.rwSet.RecordRead(key, types.StateVersion{
+	s.rwSet.RecordAccountRead(addr, state, types.StateVersion{
 		TxIndex: -1,
 	}, val)
 }
 
-func (s *StateDB) RecordWrite(key types.RWKey, val interface{}) {
+func (s *StateDB) RecordStorageRead(addr common.Address, slot common.Hash, val interface{}) {
 	if s.isParallel && s.parallel.isSlotDB {
 		return
 	}
 	if s.rwSet == nil {
 		return
 	}
-	s.rwSet.RecordWrite(key, val)
+	s.rwSet.RecordStorageRead(addr, slot, types.StateVersion{
+		TxIndex: -1,
+	}, val)
+}
+
+func (s *StateDB) RecordAccountWrite(addr common.Address, state types.AccountState, val interface{}) {
+	if s.isParallel && s.parallel.isSlotDB {
+		return
+	}
+	if s.rwSet == nil {
+		return
+	}
+	s.rwSet.RecordAccountWrite(addr, state, val)
+}
+
+func (s *StateDB) RecordStorageWrite(addr common.Address, slot common.Hash, val interface{}) {
+	if s.isParallel && s.parallel.isSlotDB {
+		return
+	}
+	if s.rwSet == nil {
+		return
+	}
+	s.rwSet.RecordStorageWrite(addr, slot, val)
 }
 
 func (s *StateDB) ResetMVStates(txCount int) {
@@ -2429,7 +2450,7 @@ func (s *StateDB) FinaliseRWSet() error {
 
 	// finalise stateObjectsDestruct
 	for addr := range s.stateObjectsDestructDirty {
-		s.RecordWrite(types.AccountStateKey(addr, types.AccountSuicide), struct{}{})
+		s.RecordAccountWrite(addr, types.AccountSuicide, struct{}{})
 	}
 	for addr := range s.journal.dirties {
 		obj, exist := s.getStateObjectFromStateObjects(addr)
@@ -2441,7 +2462,7 @@ func (s *StateDB) FinaliseRWSet() error {
 			// set indefinitely). Note only the first occurred self-destruct
 			// event is tracked.
 			if _, ok := s.stateObjectsDestruct[obj.address]; !ok {
-				s.RecordWrite(types.AccountStateKey(addr, types.AccountSuicide), struct{}{})
+				s.RecordAccountWrite(addr, types.AccountSuicide, struct{}{})
 			}
 		} else {
 			// finalise account & storages
