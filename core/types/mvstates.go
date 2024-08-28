@@ -28,11 +28,11 @@ type RWKey string
 type AccountState byte
 
 const (
-	AccountSelf AccountState = iota
-	AccountNonce
-	AccountBalance
-	AccountCodeHash
-	AccountSuicide
+	AccountSelf     AccountState = 0x01
+	AccountNonce    AccountState = 0x02
+	AccountBalance  AccountState = 0x04
+	AccountCodeHash AccountState = 0x08
+	AccountSuicide  AccountState = 0x10
 )
 
 const (
@@ -134,26 +134,30 @@ func NewRWSet(ver StateVersion) *RWSet {
 
 var (
 	accountKeyPool = sync.Pool{New: func() any {
-		return make([]byte, AccountStateKeyLen)
+		buf := make([]byte, AccountStateKeyLen)
+		return &buf
 	}}
 	storageKeyPool = sync.Pool{New: func() any {
-		return make([]byte, StorageStateKeyLen)
+		buf := make([]byte, StorageStateKeyLen)
+		return &buf
 	}}
 )
 
 func (s *RWSet) RecordAccountRead(addr common.Address, state AccountState, ver StateVersion, val interface{}) {
-	buf := accountKeyPool.Get().([]byte)
+	ptr := accountKeyPool.Get().(*[]byte)
+	buf := *ptr
 	key := AccountStateKey(buf, addr, state)
 	if !s.recordRead(key, ver, val) {
-		accountKeyPool.Put(buf)
+		accountKeyPool.Put(ptr)
 	}
 }
 
 func (s *RWSet) RecordStorageRead(addr common.Address, slot common.Hash, ver StateVersion, val interface{}) {
-	buf := storageKeyPool.Get().([]byte)
+	ptr := storageKeyPool.Get().(*[]byte)
+	buf := *ptr
 	key := StorageStateKey(buf, addr, slot)
 	if !s.recordRead(key, ver, val) {
-		storageKeyPool.Put(buf)
+		storageKeyPool.Put(ptr)
 	}
 }
 
@@ -170,18 +174,20 @@ func (s *RWSet) recordRead(key RWKey, ver StateVersion, val interface{}) bool {
 }
 
 func (s *RWSet) RecordAccountWrite(addr common.Address, state AccountState, val interface{}) {
-	buf := accountKeyPool.Get().([]byte)
+	ptr := accountKeyPool.Get().(*[]byte)
+	buf := *ptr
 	key := AccountStateKey(buf, addr, state)
 	if !s.recordWrite(key, val) {
-		accountKeyPool.Put(buf)
+		accountKeyPool.Put(ptr)
 	}
 }
 
 func (s *RWSet) RecordStorageWrite(addr common.Address, slot common.Hash, val interface{}) {
-	buf := storageKeyPool.Get().([]byte)
+	ptr := storageKeyPool.Get().(*[]byte)
+	buf := *ptr
 	key := StorageStateKey(buf, addr, slot)
 	if !s.recordWrite(key, val) {
-		storageKeyPool.Put(buf)
+		storageKeyPool.Put(ptr)
 	}
 }
 
@@ -420,7 +426,9 @@ func (s *MVStates) asyncGenLoop() {
 	for {
 		select {
 		case tx := <-s.asyncGenChan:
-			s.Finalise(tx)
+			if err := s.Finalise(tx); err != nil {
+				log.Error("async MVStates Finalise err", "err", err)
+			}
 		case <-s.asyncStopChan:
 			return
 		}
@@ -507,7 +515,7 @@ func (s *MVStates) Finalise(index int) error {
 		if err := s.innerFinalise(i); err != nil {
 			return err
 		}
-		s.resolveDepsMapCacheByWrites(index, s.rwSets[index])
+		s.resolveDepsMapCacheByWrites(i, s.rwSets[i])
 	}
 
 	return nil

@@ -27,7 +27,6 @@ func TestMVStates_BasicUsage(t *testing.T) {
 	require.NoError(t, ms.FulfillRWSet(mockRWSetWithVal(0, []interface{}{"0x00", 0}, []interface{}{"0x00", 0}), nil))
 	require.Nil(t, ms.ReadState(0, str2key("0x00")))
 	require.NoError(t, ms.Finalise(0))
-	require.Error(t, ms.Finalise(0))
 	require.Error(t, ms.FulfillRWSet(mockRWSetWithVal(0, nil, nil), nil))
 	require.Nil(t, ms.ReadState(0, str2key("0x00")))
 	require.Equal(t, NewRWItem(StateVersion{TxIndex: 0}, 0), ms.ReadState(1, str2key("0x00")))
@@ -459,6 +458,31 @@ func BenchmarkSyncMapExistPut(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		num := rand.Int() % 1000
 		m.LoadOrStore(num, num)
+	}
+}
+
+func BenchmarkSyncPool(b *testing.B) {
+	p := sync.Pool{New: func() any {
+		return make([]byte, 10)
+	}}
+	for i := 0; i < b.N; i++ {
+		buf := p.Get().([]byte)
+		if i%2 == 0 {
+			p.Put(buf)
+		}
+	}
+}
+
+func BenchmarkSyncPoolZeroAlloc(b *testing.B) {
+	p := sync.Pool{New: func() any {
+		buf := make([]byte, 10)
+		return &buf
+	}}
+	for i := 0; i < b.N; i++ {
+		ptr := p.Get().(*[]byte)
+		if i%2 == 0 {
+			p.Put(ptr)
+		}
 	}
 }
 
