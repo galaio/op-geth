@@ -4,11 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"github.com/ethereum/go-ethereum/common"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/cometbft/cometbft/libs/rand"
 	"github.com/golang/snappy"
@@ -24,48 +23,60 @@ const (
 
 func TestMVStates_BasicUsage(t *testing.T) {
 	ms := NewMVStates(0)
-	require.NoError(t, ms.FulfillRWSet(mockRWSetWithVal(0, []interface{}{"0x00", 0}, []interface{}{"0x00", 0}), nil))
-	require.Nil(t, ms.ReadState(0, str2key("0x00")))
+	require.NoError(t, ms.FulfillRWSet(mockRWSetWithVal(0, []interface{}{AccountSelf, nil, AccountBalance, 0, "0x00", 0}, []interface{}{AccountBalance, 0, "0x00", 0}), nil))
+	require.Nil(t, ms.ReadAccState(0, common.Address{}, AccountBalance))
+	require.Nil(t, ms.ReadSlotState(0, common.Address{}, str2Slot("0x00")))
 	require.NoError(t, ms.Finalise(0))
+
 	require.Error(t, ms.FulfillRWSet(mockRWSetWithVal(0, nil, nil), nil))
-	require.Nil(t, ms.ReadState(0, str2key("0x00")))
-	require.Equal(t, NewRWItem(StateVersion{TxIndex: 0}, 0), ms.ReadState(1, str2key("0x00")))
+	require.Nil(t, ms.ReadAccState(0, common.Address{}, AccountBalance))
+	require.Nil(t, ms.ReadSlotState(0, common.Address{}, str2Slot("0x00")))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 0}, 0), ms.ReadAccState(1, common.Address{}, AccountBalance))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 0}, 0), ms.ReadSlotState(1, common.Address{}, str2Slot("0x00")))
 
-	require.NoError(t, ms.FulfillRWSet(mockRWSetWithVal(1, []interface{}{"0x01", 1}, []interface{}{"0x01", 1}), nil))
-	require.Nil(t, ms.ReadState(1, str2key("0x01")))
+	require.NoError(t, ms.FulfillRWSet(mockRWSetWithVal(1, []interface{}{AccountSelf, nil, AccountBalance, 0, "0x01", 1}, []interface{}{AccountBalance, 1, "0x01", 1}), nil))
+	require.Nil(t, ms.ReadSlotState(1, common.Address{}, str2Slot("0x01")))
 	require.NoError(t, ms.Finalise(1))
-	require.Nil(t, ms.ReadState(0, str2key("0x01")))
-	require.Equal(t, NewRWItem(StateVersion{TxIndex: 1}, 1), ms.ReadState(2, str2key("0x01")))
+	require.Nil(t, ms.ReadSlotState(0, common.Address{}, str2Slot("0x01")))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 1}, 1), ms.ReadSlotState(2, common.Address{}, str2Slot("0x01")))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 1}, 1), ms.ReadAccState(2, common.Address{}, AccountBalance))
 
-	require.NoError(t, ms.FulfillRWSet(mockRWSetWithVal(2, []interface{}{"0x02", 2, "0x01", 1}, []interface{}{"0x01", 2, "0x02", 2}), nil))
+	require.NoError(t, ms.FulfillRWSet(mockRWSetWithVal(2, []interface{}{AccountSelf, nil, AccountBalance, 1, "0x02", 2, "0x01", 1}, []interface{}{AccountBalance, 2, "0x01", 2, "0x02", 2}), nil))
 	require.NoError(t, ms.Finalise(2))
-	require.Equal(t, NewRWItem(StateVersion{TxIndex: 1}, 1), ms.ReadState(2, str2key("0x01")))
-	require.Equal(t, NewRWItem(StateVersion{TxIndex: 2}, 2), ms.ReadState(3, str2key("0x01")))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 1}, 1), ms.ReadAccState(2, common.Address{}, AccountBalance))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 1}, 1), ms.ReadSlotState(2, common.Address{}, str2Slot("0x01")))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 2}, 2), ms.ReadAccState(3, common.Address{}, AccountBalance))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 2}, 2), ms.ReadSlotState(3, common.Address{}, str2Slot("0x01")))
 
-	require.NoError(t, ms.FulfillRWSet(mockRWSetWithVal(3, []interface{}{"0x03", 3, "0x00", 0, "0x01", 2}, []interface{}{"0x00", 3, "0x01", 3, "0x03", 3}), nil))
-	require.Nil(t, ms.ReadState(3, str2key("0x03")))
+	require.NoError(t, ms.FulfillRWSet(mockRWSetWithVal(3, []interface{}{AccountSelf, nil, AccountBalance, 2, "0x03", 3, "0x00", 0, "0x01", 2}, []interface{}{AccountBalance, 3, "0x00", 3, "0x01", 3, "0x03", 3}), nil))
+	require.Nil(t, ms.ReadSlotState(3, common.Address{}, str2Slot("0x03")))
 	require.NoError(t, ms.Finalise(3))
-	require.Nil(t, ms.ReadState(0, str2key("0x01")))
-	require.Equal(t, NewRWItem(StateVersion{TxIndex: 1}, 1), ms.ReadState(2, str2key("0x01")))
-	require.Equal(t, NewRWItem(StateVersion{TxIndex: 2}, 2), ms.ReadState(3, str2key("0x01")))
-	require.Equal(t, NewRWItem(StateVersion{TxIndex: 3}, 3), ms.ReadState(4, str2key("0x01")))
-	require.Nil(t, ms.ReadState(0, str2key("0x00")))
-	require.Equal(t, NewRWItem(StateVersion{TxIndex: 3}, 3), ms.ReadState(5, str2key("0x00")))
+	require.Nil(t, ms.ReadSlotState(0, common.Address{}, str2Slot("0x01")))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 1}, 1), ms.ReadSlotState(2, common.Address{}, str2Slot("0x01")))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 1}, 1), ms.ReadAccState(2, common.Address{}, AccountBalance))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 2}, 2), ms.ReadSlotState(3, common.Address{}, str2Slot("0x01")))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 2}, 2), ms.ReadAccState(3, common.Address{}, AccountBalance))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 3}, 3), ms.ReadSlotState(4, common.Address{}, str2Slot("0x01")))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 3}, 3), ms.ReadAccState(4, common.Address{}, AccountBalance))
+	require.Nil(t, ms.ReadSlotState(0, common.Address{}, str2Slot("0x00")))
+	require.Nil(t, ms.ReadAccState(0, common.Address{}, AccountBalance))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 3}, 3), ms.ReadSlotState(5, common.Address{}, str2Slot("0x00")))
+	require.Equal(t, NewRWItem(StateVersion{TxIndex: 3}, 3), ms.ReadAccState(5, common.Address{}, AccountBalance))
 }
 
 func TestMVStates_SimpleResolveTxDAG(t *testing.T) {
 	ms := NewMVStates(10)
 	finaliseRWSets(t, ms, []*RWSet{
-		mockRWSet(0, []string{"0x00"}, []string{"0x00"}),
-		mockRWSet(1, []string{"0x01"}, []string{"0x01"}),
-		mockRWSet(2, []string{"0x02"}, []string{"0x02"}),
-		mockRWSet(3, []string{"0x00", "0x03"}, []string{"0x03"}),
-		mockRWSet(4, []string{"0x00", "0x04"}, []string{"0x04"}),
-		mockRWSet(5, []string{"0x01", "0x02", "0x05"}, []string{"0x05"}),
-		mockRWSet(6, []string{"0x02", "0x05", "0x06"}, []string{"0x06"}),
-		mockRWSet(7, []string{"0x06", "0x07"}, []string{"0x07"}),
-		mockRWSet(8, []string{"0x08"}, []string{"0x08"}),
-		mockRWSet(9, []string{"0x08", "0x09"}, []string{"0x09"}),
+		mockRWSet(0, []interface{}{"0x00"}, []interface{}{"0x00"}),
+		mockRWSet(1, []interface{}{"0x01"}, []interface{}{"0x01"}),
+		mockRWSet(2, []interface{}{"0x02"}, []interface{}{"0x02"}),
+		mockRWSet(3, []interface{}{"0x00", "0x03"}, []interface{}{"0x03"}),
+		mockRWSet(4, []interface{}{"0x00", "0x04"}, []interface{}{"0x04"}),
+		mockRWSet(5, []interface{}{"0x01", "0x02", "0x05"}, []interface{}{"0x05"}),
+		mockRWSet(6, []interface{}{"0x02", "0x05", "0x06"}, []interface{}{"0x06"}),
+		mockRWSet(7, []interface{}{"0x06", "0x07"}, []interface{}{"0x07"}),
+		mockRWSet(8, []interface{}{"0x08"}, []interface{}{"0x08"}),
+		mockRWSet(9, []interface{}{"0x08", "0x09"}, []interface{}{"0x09"}),
 	})
 
 	dag, err := ms.ResolveTxDAG(10, nil)
@@ -77,16 +88,16 @@ func TestMVStates_SimpleResolveTxDAG(t *testing.T) {
 func TestMVStates_AsyncDepGen_SimpleResolveTxDAG(t *testing.T) {
 	ms := NewMVStates(10).EnableAsyncGen()
 	finaliseRWSets(t, ms, []*RWSet{
-		mockRWSet(0, []string{"0x00"}, []string{"0x00"}),
-		mockRWSet(1, []string{"0x01"}, []string{"0x01"}),
-		mockRWSet(2, []string{"0x02"}, []string{"0x02"}),
-		mockRWSet(3, []string{"0x00", "0x03"}, []string{"0x03"}),
-		mockRWSet(4, []string{"0x00", "0x04"}, []string{"0x04"}),
-		mockRWSet(5, []string{"0x01", "0x02", "0x05"}, []string{"0x05"}),
-		mockRWSet(6, []string{"0x02", "0x05", "0x06"}, []string{"0x06"}),
-		mockRWSet(7, []string{"0x06", "0x07"}, []string{"0x07"}),
-		mockRWSet(8, []string{"0x08"}, []string{"0x08"}),
-		mockRWSet(9, []string{"0x08", "0x09"}, []string{"0x09"}),
+		mockRWSet(0, []interface{}{"0x00"}, []interface{}{"0x00"}),
+		mockRWSet(1, []interface{}{"0x01"}, []interface{}{"0x01"}),
+		mockRWSet(2, []interface{}{"0x02"}, []interface{}{"0x02"}),
+		mockRWSet(3, []interface{}{"0x00", "0x03"}, []interface{}{"0x03"}),
+		mockRWSet(4, []interface{}{"0x00", "0x04"}, []interface{}{"0x04"}),
+		mockRWSet(5, []interface{}{"0x01", "0x02", "0x05"}, []interface{}{"0x05"}),
+		mockRWSet(6, []interface{}{"0x02", "0x05", "0x06"}, []interface{}{"0x06"}),
+		mockRWSet(7, []interface{}{"0x06", "0x07"}, []interface{}{"0x07"}),
+		mockRWSet(8, []interface{}{"0x08"}, []interface{}{"0x08"}),
+		mockRWSet(9, []interface{}{"0x08", "0x09"}, []interface{}{"0x09"}),
 	})
 	time.Sleep(10 * time.Millisecond)
 
@@ -171,6 +182,7 @@ func BenchmarkResolveTxDAGInMVStates(b *testing.B) {
 	for i, rwSet := range rwSets {
 		ms1.rwSets[i] = rwSet
 	}
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		resolveTxDAGInMVStates(ms1)
 	}
@@ -183,6 +195,7 @@ func BenchmarkResolveTxDAGByWritesInMVStates(b *testing.B) {
 		ms1.rwSets[i] = rwSet
 		ms1.innerFinalise(i)
 	}
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		resolveTxDAGByWritesInMVStates(ms1)
 	}
@@ -195,6 +208,7 @@ func BenchmarkResolveTxDAGDepsMapCacheByWritesInMVStates(b *testing.B) {
 		ms1.rwSets[i] = rwSet
 		ms1.innerFinalise(i)
 	}
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		resolveDepsMapCacheByWritesInMVStates(ms1)
 	}
@@ -203,6 +217,7 @@ func BenchmarkResolveTxDAGDepsMapCacheByWritesInMVStates(b *testing.B) {
 func BenchmarkMVStates_Finalise(b *testing.B) {
 	rwSets := mockRandomRWSet(mockRWSetSize)
 	ms1 := NewMVStates(mockRWSetSize)
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for k, rwSet := range rwSets {
 			ms1.rwSets[k] = rwSet
@@ -241,18 +256,18 @@ func resolveDepsMapCacheByWritesInMVStates(s *MVStates) TxDAG {
 func TestMVStates_SystemTxResolveTxDAG(t *testing.T) {
 	ms := NewMVStates(12)
 	finaliseRWSets(t, ms, []*RWSet{
-		mockRWSet(0, []string{"0x00"}, []string{"0x00"}),
-		mockRWSet(1, []string{"0x01"}, []string{"0x01"}),
-		mockRWSet(2, []string{"0x02"}, []string{"0x02"}),
-		mockRWSet(3, []string{"0x00", "0x03"}, []string{"0x03"}),
-		mockRWSet(4, []string{"0x00", "0x04"}, []string{"0x04"}),
-		mockRWSet(5, []string{"0x01", "0x02", "0x05"}, []string{"0x05"}),
-		mockRWSet(6, []string{"0x02", "0x05", "0x06"}, []string{"0x06"}),
-		mockRWSet(7, []string{"0x06", "0x07"}, []string{"0x07"}),
-		mockRWSet(8, []string{"0x08"}, []string{"0x08"}),
-		mockRWSet(9, []string{"0x08", "0x09"}, []string{"0x09"}),
-		mockRWSet(10, []string{"0x10"}, []string{"0x10"}).WithExcludedTxFlag(),
-		mockRWSet(11, []string{"0x11"}, []string{"0x11"}).WithExcludedTxFlag(),
+		mockRWSet(0, []interface{}{"0x00"}, []interface{}{"0x00"}),
+		mockRWSet(1, []interface{}{"0x01"}, []interface{}{"0x01"}),
+		mockRWSet(2, []interface{}{"0x02"}, []interface{}{"0x02"}),
+		mockRWSet(3, []interface{}{"0x00", "0x03"}, []interface{}{"0x03"}),
+		mockRWSet(4, []interface{}{"0x00", "0x04"}, []interface{}{"0x04"}),
+		mockRWSet(5, []interface{}{"0x01", "0x02", "0x05"}, []interface{}{"0x05"}),
+		mockRWSet(6, []interface{}{"0x02", "0x05", "0x06"}, []interface{}{"0x06"}),
+		mockRWSet(7, []interface{}{"0x06", "0x07"}, []interface{}{"0x07"}),
+		mockRWSet(8, []interface{}{"0x08"}, []interface{}{"0x08"}),
+		mockRWSet(9, []interface{}{"0x08", "0x09"}, []interface{}{"0x09"}),
+		mockRWSet(10, []interface{}{"0x10"}, []interface{}{"0x10"}).WithExcludedTxFlag(),
+		mockRWSet(11, []interface{}{"0x11"}, []interface{}{"0x11"}).WithExcludedTxFlag(),
 	})
 
 	dag, err := ms.ResolveTxDAG(12, nil)
@@ -264,18 +279,18 @@ func TestMVStates_SystemTxResolveTxDAG(t *testing.T) {
 func TestMVStates_SystemTxWithLargeDepsResolveTxDAG(t *testing.T) {
 	ms := NewMVStates(12)
 	finaliseRWSets(t, ms, []*RWSet{
-		mockRWSet(0, []string{"0x00"}, []string{"0x00"}),
-		mockRWSet(1, []string{"0x01"}, []string{"0x01"}),
-		mockRWSet(2, []string{"0x02"}, []string{"0x02"}),
-		mockRWSet(3, []string{"0x00", "0x03"}, []string{"0x03"}),
-		mockRWSet(4, []string{"0x00", "0x04"}, []string{"0x04"}),
-		mockRWSet(5, []string{"0x01", "0x02", "0x05"}, []string{"0x05"}),
-		mockRWSet(6, []string{"0x02", "0x05", "0x06"}, []string{"0x06"}),
-		mockRWSet(7, []string{"0x00", "0x03", "0x07"}, []string{"0x07"}),
-		mockRWSet(8, []string{"0x08"}, []string{"0x08"}),
-		mockRWSet(9, []string{"0x00", "0x01", "0x02", "0x06", "0x07", "0x08", "0x09"}, []string{"0x09"}),
-		mockRWSet(10, []string{"0x10"}, []string{"0x10"}).WithExcludedTxFlag(),
-		mockRWSet(11, []string{"0x11"}, []string{"0x11"}).WithExcludedTxFlag(),
+		mockRWSet(0, []interface{}{"0x00"}, []interface{}{"0x00"}),
+		mockRWSet(1, []interface{}{"0x01"}, []interface{}{"0x01"}),
+		mockRWSet(2, []interface{}{"0x02"}, []interface{}{"0x02"}),
+		mockRWSet(3, []interface{}{"0x00", "0x03"}, []interface{}{"0x03"}),
+		mockRWSet(4, []interface{}{"0x00", "0x04"}, []interface{}{"0x04"}),
+		mockRWSet(5, []interface{}{"0x01", "0x02", "0x05"}, []interface{}{"0x05"}),
+		mockRWSet(6, []interface{}{"0x02", "0x05", "0x06"}, []interface{}{"0x06"}),
+		mockRWSet(7, []interface{}{"0x00", "0x03", "0x07"}, []interface{}{"0x07"}),
+		mockRWSet(8, []interface{}{"0x08"}, []interface{}{"0x08"}),
+		mockRWSet(9, []interface{}{"0x00", "0x01", "0x02", "0x06", "0x07", "0x08", "0x09"}, []interface{}{"0x09"}),
+		mockRWSet(10, []interface{}{"0x10"}, []interface{}{"0x10"}).WithExcludedTxFlag(),
+		mockRWSet(11, []interface{}{"0x11"}, []interface{}{"0x11"}).WithExcludedTxFlag(),
 	})
 	dag, err := ms.ResolveTxDAG(12, nil)
 	require.NoError(t, err)
@@ -285,91 +300,91 @@ func TestMVStates_SystemTxWithLargeDepsResolveTxDAG(t *testing.T) {
 
 func TestIsEqualRWVal(t *testing.T) {
 	tests := []struct {
-		key      RWKey
+		key      *AccountState
 		src      interface{}
 		compared interface{}
 		isEqual  bool
 	}{
 		{
-			key:      AccountStateKey(nil, mockAddr, AccountNonce),
+			key:      &AccountNonce,
 			src:      uint64(0),
 			compared: uint64(0),
 			isEqual:  true,
 		},
 		{
-			key:      AccountStateKey(nil, mockAddr, AccountNonce),
+			key:      &AccountNonce,
 			src:      uint64(0),
 			compared: uint64(1),
 			isEqual:  false,
 		},
 		{
-			key:      AccountStateKey(nil, mockAddr, AccountBalance),
+			key:      &AccountBalance,
 			src:      new(uint256.Int).SetUint64(1),
 			compared: new(uint256.Int).SetUint64(1),
 			isEqual:  true,
 		},
 		{
-			key:      AccountStateKey(nil, mockAddr, AccountBalance),
+			key:      &AccountBalance,
 			src:      nil,
 			compared: new(uint256.Int).SetUint64(1),
 			isEqual:  false,
 		},
 		{
-			key:      AccountStateKey(nil, mockAddr, AccountBalance),
+			key:      &AccountBalance,
 			src:      (*uint256.Int)(nil),
 			compared: new(uint256.Int).SetUint64(1),
 			isEqual:  false,
 		},
 		{
-			key:      AccountStateKey(nil, mockAddr, AccountBalance),
+			key:      &AccountBalance,
 			src:      (*uint256.Int)(nil),
 			compared: (*uint256.Int)(nil),
 			isEqual:  true,
 		},
 		{
-			key:      AccountStateKey(nil, mockAddr, AccountCodeHash),
+			key:      &AccountCodeHash,
 			src:      []byte{1},
 			compared: []byte{1},
 			isEqual:  true,
 		},
 		{
-			key:      AccountStateKey(nil, mockAddr, AccountCodeHash),
+			key:      &AccountCodeHash,
 			src:      nil,
 			compared: []byte{1},
 			isEqual:  false,
 		},
 		{
-			key:      AccountStateKey(nil, mockAddr, AccountCodeHash),
+			key:      &AccountCodeHash,
 			src:      ([]byte)(nil),
 			compared: []byte{1},
 			isEqual:  false,
 		},
 		{
-			key:      AccountStateKey(nil, mockAddr, AccountCodeHash),
+			key:      &AccountCodeHash,
 			src:      ([]byte)(nil),
 			compared: ([]byte)(nil),
 			isEqual:  true,
 		},
 		{
-			key:      AccountStateKey(nil, mockAddr, AccountSuicide),
+			key:      &AccountSuicide,
 			src:      struct{}{},
 			compared: struct{}{},
 			isEqual:  false,
 		},
 		{
-			key:      AccountStateKey(nil, mockAddr, AccountSuicide),
+			key:      &AccountSuicide,
 			src:      nil,
 			compared: struct{}{},
 			isEqual:  false,
 		},
 		{
-			key:      StorageStateKey(nil, mockAddr, mockHash),
+			key:      nil,
 			src:      mockHash,
 			compared: mockHash,
 			isEqual:  true,
 		},
 		{
-			key:      StorageStateKey(nil, mockAddr, mockHash),
+			key:      nil,
 			src:      nil,
 			compared: mockHash,
 			isEqual:  false,
@@ -486,21 +501,41 @@ func BenchmarkSyncPoolZeroAlloc(b *testing.B) {
 	}
 }
 
-func mockRWSet(index int, read []string, write []string) *RWSet {
+func mockRWSet(index int, read []interface{}, write []interface{}) *RWSet {
 	ver := StateVersion{
 		TxIndex: index,
 	}
 	set := NewRWSet(ver)
+	set.accReadSet[common.Address{}] = map[AccountState]RWItem{}
+	set.accWriteSet[common.Address{}] = map[AccountState]RWItem{}
+	set.slotReadSet[common.Address{}] = map[common.Hash]RWItem{}
+	set.slotWriteSet[common.Address{}] = map[common.Hash]RWItem{}
 	for _, k := range read {
-		set.readSet[str2key(k)] = RWItem{
-			Ver: ver,
-			Val: struct{}{},
+		state, ok := k.(AccountState)
+		if ok {
+			set.accReadSet[common.Address{}][state] = RWItem{
+				Ver: ver,
+				Val: struct{}{},
+			}
+		} else {
+			set.slotReadSet[common.Address{}][str2Slot(k.(string))] = RWItem{
+				Ver: ver,
+				Val: struct{}{},
+			}
 		}
 	}
 	for _, k := range write {
-		set.writeSet[str2key(k)] = RWItem{
-			Ver: ver,
-			Val: struct{}{},
+		state, ok := k.(AccountState)
+		if ok {
+			set.accWriteSet[common.Address{}][state] = RWItem{
+				Ver: ver,
+				Val: struct{}{},
+			}
+		} else {
+			set.slotWriteSet[common.Address{}][str2Slot(k.(string))] = RWItem{
+				Ver: ver,
+				Val: struct{}{},
+			}
 		}
 	}
 
@@ -528,19 +563,43 @@ func mockRWSetWithVal(index int, read []interface{}, write []interface{}) *RWSet
 		panic("wrong write size")
 	}
 
+	set.accReadSet[common.Address{}] = map[AccountState]RWItem{}
+	set.slotReadSet[common.Address{}] = map[common.Hash]RWItem{}
+	set.accWriteSet[common.Address{}] = map[AccountState]RWItem{}
+	set.slotWriteSet[common.Address{}] = map[common.Hash]RWItem{}
 	for i := 0; i < len(read); {
-		set.readSet[str2key(read[i].(string))] = RWItem{
-			Ver: StateVersion{
-				TxIndex: index - 1,
-			},
-			Val: read[i+1],
+		state, ok := read[i].(AccountState)
+		if ok {
+			set.accReadSet[common.Address{}][state] = RWItem{
+				Ver: StateVersion{
+					TxIndex: index - 1,
+				},
+				Val: read[i+1],
+			}
+		} else {
+			slot := str2Slot(read[i].(string))
+			set.slotReadSet[common.Address{}][slot] = RWItem{
+				Ver: StateVersion{
+					TxIndex: index - 1,
+				},
+				Val: read[i+1],
+			}
 		}
 		i += 2
 	}
 	for i := 0; i < len(write); {
-		set.writeSet[str2key(write[i].(string))] = RWItem{
-			Ver: ver,
-			Val: write[i+1],
+		state, ok := write[i].(AccountState)
+		if ok {
+			set.accWriteSet[common.Address{}][state] = RWItem{
+				Ver: ver,
+				Val: write[i+1],
+			}
+		} else {
+			slot := str2Slot(write[i].(string))
+			set.slotWriteSet[common.Address{}][slot] = RWItem{
+				Ver: ver,
+				Val: write[i+1],
+			}
 		}
 		i += 2
 	}
@@ -548,11 +607,15 @@ func mockRWSetWithVal(index int, read []interface{}, write []interface{}) *RWSet
 	return set
 }
 
+func str2Slot(str string) common.Hash {
+	return common.BytesToHash([]byte(str))
+}
+
 func mockRandomRWSet(count int) []*RWSet {
 	var ret []*RWSet
 	for i := 0; i < count; i++ {
-		read := []string{fmt.Sprintf("0x%d", i)}
-		write := []string{fmt.Sprintf("0x%d", i)}
+		read := []interface{}{fmt.Sprintf("0x%d", i)}
+		write := []interface{}{fmt.Sprintf("0x%d", i)}
 		if i != 0 && rand.Bool() {
 			depCnt := rand.Int()%i + 1
 			last := 0
@@ -565,6 +628,32 @@ func mockRandomRWSet(count int) []*RWSet {
 				last = num
 			}
 		}
+		//if rand.Bool() {
+		//	switch rand.Int() % 4 {
+		//	case 0:
+		//		read = append(read, AccountSelf)
+		//	case 1:
+		//		read = append(read, AccountNonce)
+		//	case 2:
+		//		read = append(read, AccountBalance)
+		//	case 3:
+		//		read = append(read, AccountCodeHash)
+		//	}
+		//}
+		//if rand.Bool() {
+		//	switch rand.Int() % 5 {
+		//	case 0:
+		//		write = append(write, AccountSelf)
+		//	case 1:
+		//		write = append(write, AccountNonce)
+		//	case 2:
+		//		write = append(write, AccountBalance)
+		//	case 3:
+		//		write = append(write, AccountCodeHash)
+		//	case 4:
+		//		write = append(write, AccountSuicide)
+		//	}
+		//}
 		// random read
 		for j := 0; j < 20; j++ {
 			read = append(read, fmt.Sprintf("rr-%d-%d", j, rand.Int()))
@@ -591,16 +680,4 @@ func randInRange(i, j int) (int, bool) {
 		return 0, false
 	}
 	return rand.Int()%(j-i) + i, true
-}
-
-func str2key(k string) RWKey {
-	appendLen := common.AddressLength + common.HashLength
-	if len(k) > appendLen {
-		k = k[:appendLen]
-	}
-
-	buf := make([]byte, 1+appendLen)
-	buf[0] = StorageStatePrefix
-	copy(buf[1:], k)
-	return RWKey(bytes2Str(buf))
 }

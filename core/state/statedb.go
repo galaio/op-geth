@@ -232,10 +232,9 @@ type StateDB struct {
 	logSize uint
 
 	// parallel EVM related
-	rwSet            *types.RWSet
-	mvStates         *types.MVStates
-	stat             *types.ExeStat
-	readAccountCache map[common.Address]byte
+	rwSet    *types.RWSet
+	mvStates *types.MVStates
+	stat     *types.ExeStat
 
 	// Preimages occurred seen by VM in the scope of block.
 	preimages map[common.Hash][]byte
@@ -2341,7 +2340,6 @@ func (s *StateDB) BeforeTxTransition() {
 	s.rwSet = types.NewRWSet(types.StateVersion{
 		TxIndex: s.txIndex,
 	})
-	s.readAccountCache = make(map[common.Address]byte)
 }
 
 func (s *StateDB) BeginTxStat(index int) {
@@ -2368,7 +2366,8 @@ func (s *StateDB) StopTxStat(usedGas uint64) {
 		s.stat.Done().WithGas(usedGas)
 		rwSet := s.mvStates.RWSet(s.txIndex)
 		if rwSet != nil {
-			s.stat.WithRead(len(rwSet.ReadSet()))
+			ar, sr := rwSet.ReadSet()
+			s.stat.WithRead(len(ar) + len(sr))
 		}
 	}
 }
@@ -2380,12 +2379,6 @@ func (s *StateDB) RecordAccountRead(addr common.Address, state types.AccountStat
 	if s.rwSet == nil {
 		return
 	}
-
-	v, ok := s.readAccountCache[addr]
-	if ok && v&byte(state) > 0 {
-		return
-	}
-	s.readAccountCache[addr] = v | byte(state)
 	s.rwSet.RecordAccountRead(addr, state, types.StateVersion{
 		TxIndex: -1,
 	}, val)
@@ -2433,7 +2426,6 @@ func (s *StateDB) ResetMVStates(txCount int) {
 
 	s.mvStates = types.NewMVStates(txCount).EnableAsyncGen()
 	s.rwSet = nil
-	s.readAccountCache = nil
 }
 
 func (s *StateDB) FinaliseRWSet() error {
@@ -2481,7 +2473,6 @@ func (s *StateDB) FinaliseRWSet() error {
 
 	// reset stateDB
 	s.rwSet = nil
-	s.readAccountCache = nil
 	if err := s.mvStates.FulfillRWSet(rwSet, stat); err != nil {
 		return err
 	}

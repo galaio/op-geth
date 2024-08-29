@@ -1,15 +1,12 @@
 package types
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
-	"sync"
-	"unsafe"
-
 	"github.com/emirpasic/gods/maps/treemap"
 	"github.com/emirpasic/gods/utils"
+	"strings"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
@@ -17,17 +14,9 @@ import (
 	"golang.org/x/exp/slices"
 )
 
-const (
-	AccountStatePrefix = 'a'
-	StorageStatePrefix = 's'
-)
-
-// RWKey max length is [1 + common.AddressLength + common.HashLength]byte
-type RWKey string
-
 type AccountState byte
 
-const (
+var (
 	AccountSelf     AccountState = 0x01
 	AccountNonce    AccountState = 0x02
 	AccountBalance  AccountState = 0x04
@@ -37,72 +26,7 @@ const (
 
 const (
 	asyncDepGenChanSize = 1000
-	AccountStateKeyLen  = 2 + common.AddressLength
-	StorageStateKeyLen  = 1 + common.AddressLength + common.HashLength
 )
-
-func AccountStateKey(buf []byte, account common.Address, state AccountState) RWKey {
-	if len(buf) == 0 {
-		buf = make([]byte, AccountStateKeyLen)
-	}
-	if len(buf) != AccountStateKeyLen {
-		panic("cannot use this buf for AccountStateKey")
-	}
-	buf[0] = AccountStatePrefix
-	copy(buf[1:], account.Bytes())
-	buf[1+common.AddressLength] = byte(state)
-	return RWKey(bytes2Str(buf))
-}
-
-func StorageStateKey(buf []byte, account common.Address, state common.Hash) RWKey {
-	if len(buf) == 0 {
-		buf = make([]byte, StorageStateKeyLen)
-	}
-	if len(buf) != StorageStateKeyLen {
-		panic("cannot use this buf for StorageStateKey")
-	}
-	buf[0] = StorageStatePrefix
-	copy(buf[1:], account.Bytes())
-	copy(buf[1+common.AddressLength:], state.Bytes())
-	return RWKey(bytes2Str(buf))
-}
-
-func (key RWKey) IsAccountState() (bool, AccountState) {
-	return AccountStatePrefix == key[0], AccountState(key[1+common.AddressLength])
-}
-
-func (key RWKey) IsAccountSelf() bool {
-	ok, s := key.IsAccountState()
-	if !ok {
-		return false
-	}
-	return s == AccountSelf
-}
-
-func (key RWKey) IsAccountSuicide() bool {
-	ok, s := key.IsAccountState()
-	if !ok {
-		return false
-	}
-	return s == AccountSuicide
-}
-
-func (key RWKey) ToAccountSelf() RWKey {
-	return AccountStateKey(nil, key.Addr(), AccountSelf)
-}
-
-func (key RWKey) IsStorageState() bool {
-	return StorageStatePrefix == key[0]
-}
-
-func (key RWKey) String() string {
-	return hex.EncodeToString([]byte(key))
-}
-
-func (key RWKey) Addr() common.Address {
-	raw := str2Bytes(string(key))
-	return common.BytesToAddress(raw[1 : 1+common.AddressLength])
-}
 
 // StateVersion record specific TxIndex & TxIncarnation
 // if TxIndex equals to -1, it means the state read from DB.
@@ -115,9 +39,11 @@ type StateVersion struct {
 // RWSet record all read & write set in txs
 // Attention: this is not a concurrent safety structure
 type RWSet struct {
-	ver      StateVersion
-	readSet  map[RWKey]RWItem
-	writeSet map[RWKey]RWItem
+	ver          StateVersion
+	accReadSet   map[common.Address]map[AccountState]RWItem
+	accWriteSet  map[common.Address]map[AccountState]RWItem
+	slotReadSet  map[common.Address]map[common.Hash]RWItem
+	slotWriteSet map[common.Address]map[common.Hash]RWItem
 
 	// some flags
 	rwRecordDone bool
@@ -126,94 +52,112 @@ type RWSet struct {
 
 func NewRWSet(ver StateVersion) *RWSet {
 	return &RWSet{
-		ver:      ver,
-		readSet:  make(map[RWKey]RWItem),
-		writeSet: make(map[RWKey]RWItem),
+		ver:          ver,
+		accReadSet:   make(map[common.Address]map[AccountState]RWItem),
+		accWriteSet:  make(map[common.Address]map[AccountState]RWItem),
+		slotReadSet:  make(map[common.Address]map[common.Hash]RWItem),
+		slotWriteSet: make(map[common.Address]map[common.Hash]RWItem),
 	}
 }
 
-var (
-	accountKeyPool = sync.Pool{New: func() any {
-		buf := make([]byte, AccountStateKeyLen)
-		return &buf
-	}}
-	storageKeyPool = sync.Pool{New: func() any {
-		buf := make([]byte, StorageStateKeyLen)
-		return &buf
-	}}
-)
-
 func (s *RWSet) RecordAccountRead(addr common.Address, state AccountState, ver StateVersion, val interface{}) {
-	ptr := accountKeyPool.Get().(*[]byte)
-	buf := *ptr
-	key := AccountStateKey(buf, addr, state)
-	if !s.recordRead(key, ver, val) {
-		accountKeyPool.Put(ptr)
+	// only record the first read version
+	sub, ok := s.accReadSet[addr]
+	if !ok {
+		s.accReadSet[addr] = make(map[AccountState]RWItem)
+		s.accReadSet[addr][state] = RWItem{
+			Ver: ver,
+			Val: val,
+		}
+		return
+	}
+	if _, ok = sub[state]; ok {
+		return
+	}
+	s.accReadSet[addr][state] = RWItem{
+		Ver: ver,
+		Val: val,
 	}
 }
 
 func (s *RWSet) RecordStorageRead(addr common.Address, slot common.Hash, ver StateVersion, val interface{}) {
-	ptr := storageKeyPool.Get().(*[]byte)
-	buf := *ptr
-	key := StorageStateKey(buf, addr, slot)
-	if !s.recordRead(key, ver, val) {
-		storageKeyPool.Put(ptr)
-	}
-}
-
-func (s *RWSet) recordRead(key RWKey, ver StateVersion, val interface{}) bool {
 	// only record the first read version
-	if _, exist := s.readSet[key]; exist {
-		return false
+	sub, ok := s.slotReadSet[addr]
+	if !ok {
+		s.slotReadSet[addr] = make(map[common.Hash]RWItem)
+		s.slotReadSet[addr][slot] = RWItem{
+			Ver: ver,
+			Val: val,
+		}
+		return
 	}
-	s.readSet[key] = RWItem{
+	if _, ok = sub[slot]; ok {
+		return
+	}
+	s.slotReadSet[addr][slot] = RWItem{
 		Ver: ver,
 		Val: val,
 	}
-	return true
 }
 
 func (s *RWSet) RecordAccountWrite(addr common.Address, state AccountState, val interface{}) {
-	ptr := accountKeyPool.Get().(*[]byte)
-	buf := *ptr
-	key := AccountStateKey(buf, addr, state)
-	if !s.recordWrite(key, val) {
-		accountKeyPool.Put(ptr)
+	_, ok := s.accWriteSet[addr]
+	if !ok {
+		s.accWriteSet[addr] = make(map[AccountState]RWItem)
+	}
+	s.accWriteSet[addr][state] = RWItem{
+		Ver: s.ver,
+		Val: val,
 	}
 }
 
 func (s *RWSet) RecordStorageWrite(addr common.Address, slot common.Hash, val interface{}) {
-	ptr := storageKeyPool.Get().(*[]byte)
-	buf := *ptr
-	key := StorageStateKey(buf, addr, slot)
-	if !s.recordWrite(key, val) {
-		storageKeyPool.Put(ptr)
+	_, ok := s.slotWriteSet[addr]
+	if !ok {
+		s.slotWriteSet[addr] = make(map[common.Hash]RWItem)
+	}
+	s.slotWriteSet[addr][slot] = RWItem{
+		Ver: s.ver,
+		Val: val,
 	}
 }
 
-func (s *RWSet) recordWrite(key RWKey, val interface{}) bool {
-	wr, exist := s.writeSet[key]
-	if !exist {
-		s.writeSet[key] = RWItem{
-			Ver: s.ver,
-			Val: val,
-		}
-		return true
+func (s *RWSet) queryAccReadItem(addr common.Address, state AccountState) *RWItem {
+	sub, ok := s.accReadSet[addr]
+	if !ok {
+		return nil
 	}
-	wr.Val = val
-	return false
+
+	ret, ok := sub[state]
+	if !ok {
+		return nil
+	}
+	return &ret
+}
+
+func (s *RWSet) querySlotReadItem(addr common.Address, slot common.Hash) *RWItem {
+	sub, ok := s.slotReadSet[addr]
+	if !ok {
+		return nil
+	}
+
+	ret, ok := sub[slot]
+	if !ok {
+		return nil
+	}
+	return &ret
 }
 
 func (s *RWSet) Version() StateVersion {
 	return s.ver
 }
 
-func (s *RWSet) ReadSet() map[RWKey]RWItem {
-	return s.readSet
+func (s *RWSet) ReadSet() (map[common.Address]map[AccountState]RWItem, map[common.Address]map[common.Hash]RWItem) {
+	return s.accReadSet, s.slotReadSet
 }
 
-func (s *RWSet) WriteSet() map[RWKey]RWItem {
-	return s.writeSet
+func (s *RWSet) WriteSet() (map[common.Address]map[AccountState]RWItem, map[common.Address]map[common.Hash]RWItem) {
+	return s.accWriteSet, s.slotWriteSet
 }
 
 func (s *RWSet) WithExcludedTxFlag() *RWSet {
@@ -225,7 +169,15 @@ func (s *RWSet) String() string {
 	builder := strings.Builder{}
 	builder.WriteString(fmt.Sprintf("tx: %v, inc: %v\nreadSet: [", s.ver.TxIndex, s.ver.TxIncarnation))
 	i := 0
-	for key, _ := range s.readSet {
+	for key, _ := range s.accReadSet {
+		if i > 0 {
+			builder.WriteString(fmt.Sprintf(", %v", key.String()))
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("%v", key.String()))
+		i++
+	}
+	for key, _ := range s.slotReadSet {
 		if i > 0 {
 			builder.WriteString(fmt.Sprintf(", %v", key.String()))
 			continue
@@ -235,7 +187,15 @@ func (s *RWSet) String() string {
 	}
 	builder.WriteString("]\nwriteSet: [")
 	i = 0
-	for key, _ := range s.writeSet {
+	for key, _ := range s.accWriteSet {
+		if i > 0 {
+			builder.WriteString(fmt.Sprintf(", %v", key.String()))
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("%v", key.String()))
+		i++
+	}
+	for key, _ := range s.slotWriteSet {
 		if i > 0 {
 			builder.WriteString(fmt.Sprintf(", %v", key.String()))
 			continue
@@ -248,9 +208,9 @@ func (s *RWSet) String() string {
 }
 
 // isEqualRWVal compare state
-func isEqualRWVal(key RWKey, src interface{}, compared interface{}) bool {
-	if ok, state := key.IsAccountState(); ok {
-		switch state {
+func isEqualRWVal(accState *AccountState, src interface{}, compared interface{}) bool {
+	if accState != nil {
+		switch *accState {
 		case AccountBalance:
 			if src != nil && compared != nil {
 				return equalUint256(src.(*uint256.Int), compared.(*uint256.Int))
@@ -364,9 +324,10 @@ func (w *PendingWrites) FindPrevWrites(txIndex int) []*RWItem {
 }
 
 type MVStates struct {
-	rwSets            map[int]*RWSet
-	pendingWriteSet   map[RWKey]*PendingWrites
-	nextFinaliseIndex int
+	rwSets              map[int]*RWSet
+	pendingAccWriteSet  map[common.Address]map[AccountState]*PendingWrites
+	pendingSlotWriteSet map[common.Address]map[common.Hash]*PendingWrites
+	nextFinaliseIndex   int
 
 	// dependency map cache for generating TxDAG
 	// depMapCache[i].exist(j) means j->i, and i > j
@@ -384,10 +345,11 @@ type MVStates struct {
 
 func NewMVStates(txCount int) *MVStates {
 	return &MVStates{
-		rwSets:          make(map[int]*RWSet, txCount),
-		pendingWriteSet: make(map[RWKey]*PendingWrites, txCount*8),
-		txDepCache:      make([]TxDepMaker, 0, txCount),
-		stats:           make(map[int]*ExeStat, txCount),
+		rwSets:              make(map[int]*RWSet, txCount),
+		pendingAccWriteSet:  make(map[common.Address]map[AccountState]*PendingWrites, txCount*8),
+		pendingSlotWriteSet: make(map[common.Address]map[common.Hash]*PendingWrites, txCount*8),
+		txDepCache:          make([]TxDepMaker, 0, txCount),
+		stats:               make(map[int]*ExeStat, txCount),
 	}
 }
 
@@ -456,12 +418,32 @@ func (s *MVStates) RWSet(index int) *RWSet {
 	return s.rwSets[index]
 }
 
-// ReadState read state from MVStates
-func (s *MVStates) ReadState(txIndex int, key RWKey) *RWItem {
+// ReadAccState read state from MVStates
+func (s *MVStates) ReadAccState(txIndex int, addr common.Address, state AccountState) *RWItem {
 	s.lock.RLock()
 	defer s.lock.RUnlock()
 
-	wset, ok := s.pendingWriteSet[key]
+	sub, ok := s.pendingAccWriteSet[addr]
+	if !ok {
+		return nil
+	}
+	wset, ok := sub[state]
+	if !ok {
+		return nil
+	}
+	return wset.FindLastWrite(txIndex)
+}
+
+// ReadSlotState read state from MVStates
+func (s *MVStates) ReadSlotState(txIndex int, addr common.Address, slot common.Hash) *RWItem {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+
+	sub, ok := s.pendingSlotWriteSet[addr]
+	if !ok {
+		return nil
+	}
+	wset, ok := sub[slot]
 	if !ok {
 		return nil
 	}
@@ -483,13 +465,6 @@ func (s *MVStates) FulfillRWSet(rwSet *RWSet, stat *ExeStat) error {
 		}
 		s.stats[index] = stat
 	}
-
-	//if metrics.EnabledExpensive {
-	//	for k := range rwSet.writeSet {
-	//		// this action is only for testing, it runs when enable expensive metrics.
-	//		checkRWSetInconsistent(index, k, rwSet.readSet, rwSet.writeSet)
-	//	}
-	//}
 	s.rwSets[index] = rwSet
 	return nil
 }
@@ -532,14 +507,44 @@ func (s *MVStates) innerFinalise(index int) error {
 	}
 
 	// append to pending write set
-	for k, v := range rwSet.writeSet {
-		if _, exist := s.pendingWriteSet[k]; !exist {
-			s.pendingWriteSet[k] = NewPendingWrites()
+	for addr, sub := range rwSet.accWriteSet {
+		if _, exist := s.pendingAccWriteSet[addr]; !exist {
+			s.pendingAccWriteSet[addr] = make(map[AccountState]*PendingWrites)
 		}
-		s.pendingWriteSet[k].Append(&v)
+		for state, item := range sub {
+			if _, exist := s.pendingAccWriteSet[addr][state]; !exist {
+				s.pendingAccWriteSet[addr][state] = NewPendingWrites()
+			}
+			s.pendingAccWriteSet[addr][state].Append(&item)
+		}
+	}
+	for k, sub := range rwSet.slotWriteSet {
+		if _, exist := s.pendingSlotWriteSet[k]; !exist {
+			s.pendingSlotWriteSet[k] = make(map[common.Hash]*PendingWrites)
+		}
+		for slot, item := range sub {
+			if _, exist := s.pendingSlotWriteSet[k][slot]; !exist {
+				s.pendingSlotWriteSet[k][slot] = NewPendingWrites()
+			}
+			s.pendingSlotWriteSet[k][slot].Append(&item)
+		}
 	}
 	s.nextFinaliseIndex++
 	return nil
+}
+
+func (s *MVStates) queryAccWrites(addr common.Address, state AccountState) *PendingWrites {
+	if _, exist := s.pendingAccWriteSet[addr]; !exist {
+		return nil
+	}
+	return s.pendingAccWriteSet[addr][state]
+}
+
+func (s *MVStates) querySlotWrites(addr common.Address, slot common.Hash) *PendingWrites {
+	if _, exist := s.pendingSlotWriteSet[addr]; !exist {
+		return nil
+	}
+	return s.pendingSlotWriteSet[addr][slot]
 }
 
 // resolveDepsCacheByWrites must be executed in order
@@ -551,33 +556,60 @@ func (s *MVStates) resolveDepsCacheByWrites(index int, rwSet *RWSet) {
 		return
 	}
 	// check tx dependency, only check key, skip version
-	if len(s.pendingWriteSet) > len(rwSet.readSet) {
-		for key := range rwSet.readSet {
-			// check self destruct
-			if key.IsAccountSelf() {
-				key = AccountStateKey(nil, key.Addr(), AccountSuicide)
+	if len(s.pendingAccWriteSet)+len(s.pendingSlotWriteSet) > len(rwSet.accReadSet)+len(rwSet.slotReadSet) {
+		for addr, sub := range rwSet.accReadSet {
+			for state := range sub {
+				// check self destruct
+				if state == AccountSelf {
+					state = AccountSuicide
+				}
+				writes := s.queryAccWrites(addr, state)
+				if writes == nil {
+					continue
+				}
+				items := writes.FindPrevWrites(index)
+				for _, item := range items {
+					depSlice.add(uint64(item.TxIndex()))
+				}
 			}
-			writes := s.pendingWriteSet[key]
-			if writes == nil {
-				continue
-			}
-			items := writes.FindPrevWrites(index)
-			for _, item := range items {
-				depSlice.add(uint64(item.TxIndex()))
+		}
+		for addr, sub := range rwSet.slotReadSet {
+			for slot := range sub {
+				writes := s.querySlotWrites(addr, slot)
+				if writes == nil {
+					continue
+				}
+				items := writes.FindPrevWrites(index)
+				for _, item := range items {
+					depSlice.add(uint64(item.TxIndex()))
+				}
 			}
 		}
 	} else {
-		for k, w := range s.pendingWriteSet {
-			// check suicide, add read address flag, it only for check suicide quickly, and cannot for other scenarios.
-			if k.IsAccountSuicide() {
-				k = k.ToAccountSelf()
+		for addr, sub := range s.pendingAccWriteSet {
+			for state, writes := range sub {
+				// check suicide, add read address flag, it only for check suicide quickly, and cannot for other scenarios.
+				if state == AccountSuicide {
+					state = AccountSelf
+				}
+				if rwSet.queryAccReadItem(addr, state) == nil {
+					continue
+				}
+				items := writes.FindPrevWrites(index)
+				for _, item := range items {
+					depSlice.add(uint64(item.TxIndex()))
+				}
 			}
-			if _, ok := rwSet.readSet[k]; !ok {
-				continue
-			}
-			items := w.FindPrevWrites(index)
-			for _, item := range items {
-				depSlice.add(uint64(item.TxIndex()))
+		}
+		for addr, sub := range s.pendingSlotWriteSet {
+			for slot, writes := range sub {
+				if rwSet.querySlotReadItem(addr, slot) == nil {
+					continue
+				}
+				items := writes.FindPrevWrites(index)
+				for _, item := range items {
+					depSlice.add(uint64(item.TxIndex()))
+				}
 			}
 		}
 	}
@@ -618,13 +650,14 @@ func (s *MVStates) resolveDepsMapCacheByWrites(index int, rwSet *RWSet) {
 		return
 	}
 	// check tx dependency, only check key, skip version
-	if len(s.pendingWriteSet) > len(rwSet.readSet) {
-		for key := range rwSet.readSet {
+	//if len(s.pendingAccWriteSet)+len(s.pendingSlotWriteSet) > len(rwSet.accReadSet)+len(rwSet.slotReadSet) {
+	for addr, sub := range rwSet.accReadSet {
+		for state := range sub {
 			// check self destruct
-			if key.IsAccountSelf() {
-				key = AccountStateKey(nil, key.Addr(), AccountSuicide)
+			if state == AccountSelf {
+				state = AccountSuicide
 			}
-			writes := s.pendingWriteSet[key]
+			writes := s.queryAccWrites(addr, state)
 			if writes == nil {
 				continue
 			}
@@ -633,21 +666,47 @@ func (s *MVStates) resolveDepsMapCacheByWrites(index int, rwSet *RWSet) {
 				depMap.add(uint64(item.TxIndex()))
 			}
 		}
-	} else {
-		for k, w := range s.pendingWriteSet {
-			// check suicide, add read address flag, it only for check suicide quickly, and cannot for other scenarios.
-			if k.IsAccountSuicide() {
-				k = k.ToAccountSelf()
-			}
-			if _, ok := rwSet.readSet[k]; !ok {
+	}
+	for addr, sub := range rwSet.slotReadSet {
+		for slot := range sub {
+			writes := s.querySlotWrites(addr, slot)
+			if writes == nil {
 				continue
 			}
-			items := w.FindPrevWrites(index)
+			items := writes.FindPrevWrites(index)
 			for _, item := range items {
 				depMap.add(uint64(item.TxIndex()))
 			}
 		}
 	}
+	//} else {
+	//	for addr, sub := range s.pendingAccWriteSet {
+	//		for state, writes := range sub {
+	//			// check suicide, add read address flag, it only for check suicide quickly, and cannot for other scenarios.
+	//			if state == AccountSuicide {
+	//				state = AccountSelf
+	//			}
+	//			if rwSet.queryAccReadItem(addr, state) == nil {
+	//				continue
+	//			}
+	//			items := writes.FindPrevWrites(index)
+	//			for _, item := range items {
+	//				depMap.add(uint64(item.TxIndex()))
+	//			}
+	//		}
+	//	}
+	//	for addr, sub := range s.pendingSlotWriteSet {
+	//		for slot, writes := range sub {
+	//			if rwSet.querySlotReadItem(addr, slot) == nil {
+	//				continue
+	//			}
+	//			items := writes.FindPrevWrites(index)
+	//			for _, item := range items {
+	//				depMap.add(uint64(item.TxIndex()))
+	//			}
+	//		}
+	//	}
+	//}
 	// clear redundancy deps compared with prev
 	preDeps := depMap.deps()
 	for _, prev := range preDeps {
@@ -678,7 +737,16 @@ func (s *MVStates) resolveDepsCache(index int, rwSet *RWSet) {
 			continue
 		}
 		// check if there has written op before i
-		if checkDependency(prevSet.writeSet, rwSet.readSet) {
+		if checkAccDependency(prevSet.accWriteSet, rwSet.accReadSet) {
+			depMap.add(uint64(prev))
+			// clear redundancy deps compared with prev
+			for _, dep := range depMap.deps() {
+				if s.txDepCache[prev].exist(dep) {
+					depMap.remove(dep)
+				}
+			}
+		}
+		if checkSlotDependency(prevSet.slotWriteSet, rwSet.slotReadSet) {
 			depMap.add(uint64(prev))
 			// clear redundancy deps compared with prev
 			for _, dep := range depMap.deps() {
@@ -689,30 +757,6 @@ func (s *MVStates) resolveDepsCache(index int, rwSet *RWSet) {
 		}
 	}
 	s.txDepCache = append(s.txDepCache, depMap)
-}
-
-// checkRWSetInconsistent a helper function
-func checkRWSetInconsistent(index int, k RWKey, readSet map[RWKey]*RWItem, writeSet map[RWKey]*RWItem) bool {
-	var (
-		readOk  bool
-		writeOk bool
-		r       *RWItem
-	)
-
-	if k.IsAccountSuicide() {
-		_, readOk = readSet[k.ToAccountSelf()]
-	} else {
-		_, readOk = readSet[k]
-	}
-
-	r, writeOk = writeSet[k]
-	if readOk != writeOk {
-		// check if it's correct? read nil, write non-nil
-		log.Warn("checkRWSetInconsistent find inconsistent", "tx", index, "k", k.String(), "read", readOk, "write", writeOk, "val", r.Val)
-		return true
-	}
-
-	return false
 }
 
 // ResolveTxDAG generate TxDAG from RWSets
@@ -734,7 +778,10 @@ func (s *MVStates) ResolveTxDAG(txCnt int, gasFeeReceivers []common.Address) (Tx
 	for i := 0; i < txCnt; i++ {
 		// check if there are RW with gas fee receiver for gas delay calculation
 		for _, addr := range gasFeeReceivers {
-			if _, ok := s.rwSets[i].readSet[AccountStateKey(nil, addr, AccountSelf)]; ok {
+			if _, ok := s.rwSets[i].accReadSet[addr]; !ok {
+				continue
+			}
+			if _, ok := s.rwSets[i].accReadSet[addr][AccountSelf]; ok {
 				return NewEmptyTxDAG(), nil
 			}
 		}
@@ -763,18 +810,39 @@ func (s *MVStates) ResolveTxDAG(txCnt int, gasFeeReceivers []common.Address) (Tx
 	return txDAG, nil
 }
 
-func checkDependency(writeSet map[RWKey]RWItem, readSet map[RWKey]RWItem) bool {
+func checkAccDependency(writeSet map[common.Address]map[AccountState]RWItem, readSet map[common.Address]map[AccountState]RWItem) bool {
 	// check tx dependency, only check key, skip version
-	for k, _ := range writeSet {
-		// check suicide, add read address flag, it only for check suicide quickly, and cannot for other scenarios.
-		if k.IsAccountSuicide() {
-			if _, ok := readSet[k.ToAccountSelf()]; ok {
-				return true
-			}
+	for addr, sub := range writeSet {
+		if _, ok := readSet[addr]; !ok {
 			continue
 		}
-		if _, ok := readSet[k]; ok {
-			return true
+		for state := range sub {
+			// check suicide, add read address flag, it only for check suicide quickly, and cannot for other scenarios.
+			if state == AccountSuicide {
+				if _, ok := readSet[addr][AccountSelf]; ok {
+					return true
+				}
+				continue
+			}
+			if _, ok := readSet[addr][state]; ok {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func checkSlotDependency(writeSet map[common.Address]map[common.Hash]RWItem, readSet map[common.Address]map[common.Hash]RWItem) bool {
+	// check tx dependency, only check key, skip version
+	for addr, sub := range writeSet {
+		if _, ok := readSet[addr]; !ok {
+			continue
+		}
+		for slot := range sub {
+			if _, ok := readSet[addr][slot]; ok {
+				return true
+			}
 		}
 	}
 
@@ -919,14 +987,4 @@ func (m *TxDepTreeMap) remove(index uint64) {
 
 func (m *TxDepTreeMap) len() int {
 	return m.tm.Size()
-}
-
-func bytes2Str(buf []byte) string {
-	p := unsafe.SliceData(buf)
-	return unsafe.String(p, len(buf))
-}
-
-func str2Bytes(s string) []byte {
-	p := unsafe.StringData(s)
-	return unsafe.Slice(p, len(s))
 }
