@@ -18,6 +18,7 @@
 package core
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1968,7 +1969,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool) (int, error)
 			dag, err := statedb.ResolveTxDAG(len(block.Transactions()))
 			if err == nil {
 				// TODO(galaio): check TxDAG correctness?
-				log.Debug("Process TxDAG result", "block", block.NumberU64(), "tx", len(block.Transactions()), "txDAG", dag)
+				enc, _ := types.EncodeTxDAG(dag)
+				output := fmt.Sprintf("%v,%v", block.NumberU64(), hex.EncodeToString(enc))
+				log.Debug("Process TxDAG result", "block", block.NumberU64(), "tx", len(block.Transactions()), "txDAG", output)
 				if metrics.EnabledExpensive {
 					go types.EvaluateTxDAGPerformance(dag)
 				}
