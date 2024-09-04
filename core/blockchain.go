@@ -1971,7 +1971,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool) (int, error)
 				// TODO(galaio): check TxDAG correctness?
 				enc, _ := types.EncodeTxDAG(dag)
 				output := fmt.Sprintf("%v,%v", block.NumberU64(), hex.EncodeToString(enc))
-				log.Debug("Process TxDAG result", "block", block.NumberU64(), "tx", len(block.Transactions()), "txDAG", output)
+				log.Info("Process TxDAG result", "block", block.NumberU64(), "tx", len(block.Transactions()), "txDAG", output)
 				if metrics.EnabledExpensive {
 					go types.EvaluateTxDAGPerformance(dag)
 				}
