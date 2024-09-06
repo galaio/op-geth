@@ -1089,6 +1089,13 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 		Category: flags.VMCategory,
 	}
 
+	ParallelTxDAGFileFlag = &cli.StringFlag{
+		Name:     "parallel.txdagfile",
+		Usage:    "It indicates the TxDAG file path",
+		Value:    "./parallel-txdag-output.csv",
+		Category: flags.VMCategory,
+	}
+
 	VMOpcodeOptimizeFlag = &cli.BoolFlag{
 		Name:     "vm.opcode.optimize",
 		Usage:    "enable opcode optimization",
@@ -1987,6 +1994,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 
 	if ctx.IsSet(ParallelTxDAGFlag.Name) {
 		cfg.EnableParallelTxDAG = ctx.Bool(ParallelTxDAGFlag.Name)
+	}
+	if ctx.IsSet(ParallelTxDAGFileFlag.Name) {
+		cfg.ParallelTxDAGFile = ctx.String(ParallelTxDAGFileFlag.Name)
 	}
 
 	if ctx.IsSet(ParallelTxDAGSenderPrivFlag.Name) {

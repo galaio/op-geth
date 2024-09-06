@@ -1313,7 +1313,7 @@ func (w *worker) generateWork(genParams *generateParams) *newPayloadResult {
 	if w.chain.TxDAGEnabledWhenMine() {
 		feeReceivers := []common.Address{work.coinbase, params.OptimismBaseFeeRecipient, params.OptimismL1FeeRecipient}
 		work.state.ResetMVStates(0, feeReceivers)
-		log.Debug("ResetMVStates", "block", work.header.Number.Uint64())
+		log.Debug("ResetMVStates when mining", "block", work.header.Number.Uint64())
 	}
 	for _, tx := range genParams.txs {
 		from, _ := types.Sender(work.signer, tx)

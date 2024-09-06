@@ -464,6 +464,7 @@ func (s *MVStates) finalisePreviousRWSet(reads []RWEventItem) {
 		s.rwSets = append(s.rwSets, RWSet{index: -1})
 	}
 	s.rwSets[index] = s.asyncRWSet
+	log.Debug("finalisePreviousRWSet", "tx", index, "rwset", s.asyncRWSet)
 
 	if index > s.nextFinaliseIndex {
 		log.Error("finalise in wrong order", "next", s.nextFinaliseIndex, "input", index)
@@ -772,6 +773,7 @@ func (s *MVStates) resolveDepsMapCacheByWrites(index int, rwSet *RWSet) {
 			depSlice.add(tx)
 		}
 	}
+	log.Debug("resolveDepsMapCacheByWrites before", "tx", index, "deps", depSlice.deps())
 	// clear redundancy deps compared with prev
 	preDeps := depSlice.deps()
 	var removed []uint64
