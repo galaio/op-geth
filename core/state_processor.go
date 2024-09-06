@@ -95,6 +95,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	if p.bc.enableTxDAG {
 		feeReceivers := []common.Address{context.Coinbase, params.OptimismBaseFeeRecipient, params.OptimismL1FeeRecipient}
 		statedb.ResetMVStates(len(block.Transactions()), feeReceivers).EnableAsyncGen()
+		log.Debug("ResetMVStates when import", "block", block.NumberU64(), "txs", len(block.Transactions()))
 	}
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
@@ -132,9 +133,16 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		dag, err := statedb.ResolveTxDAG(len(block.Transactions()))
 		if err == nil {
 			// TODO(galaio): check TxDAG correctness?
-			log.Debug("Process TxDAG result", "block", block.NumberU64(), "tx", len(block.Transactions()), "txDAG", dag.TxCount())
+			log.Debug("Process TxDAG result", "block", block.NumberU64(), "tx", len(block.Transactions()), "txDAG", dag)
 			if metrics.EnabledExpensive {
 				go types.EvaluateTxDAGPerformance(dag)
+			}
+			// try to write txDAG into file
+			if p.bc.txDAGWriteCh != nil && dag != nil {
+				p.bc.txDAGWriteCh <- TxDAGOutputItem{
+					blockNumber: block.NumberU64(),
+					txDAG:       dag,
+				}
 			}
 		} else {
 			log.Error("ResolveTxDAG err", "block", block.NumberU64(), "tx", len(block.Transactions()), "err", err)

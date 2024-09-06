@@ -17,7 +17,9 @@
 package tests
 
 import (
+	"github.com/ethereum/go-ethereum/log"
 	"math/rand"
+	"os"
 	"runtime"
 	"testing"
 
@@ -74,7 +76,7 @@ func TestExecutionSpecBlocktests(t *testing.T) {
 }
 
 func TestBlockchainWithTxDAG(t *testing.T) {
-	//log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelDebug, true)))
+	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelDebug, true)))
 	bt := new(testMatcher)
 	// General state tests are 'exported' as blockchain tests, but we can run them natively.
 	// For speedier CI-runs, the line below can be uncommented, so those are skipped.

@@ -245,6 +245,24 @@ type RWEventItem struct {
 	Slot  common.Hash
 }
 
+func (e RWEventItem) String() string {
+	switch e.Event {
+	case NewTxRWEvent:
+		return fmt.Sprintf("(%v)%v", e.Event, e.Index)
+	case ReadAccRWEvent:
+		return fmt.Sprintf("(%v)%v|%v", e.Event, e.Addr, e.State)
+	case WriteAccRWEvent:
+		return fmt.Sprintf("(%v)%v|%v", e.Event, e.Addr, e.State)
+	case ReadSlotRWEvent:
+		return fmt.Sprintf("(%v)%v|%v", e.Event, e.Addr, e.Slot)
+	case WriteSlotRWEvent:
+		return fmt.Sprintf("(%v)%v|%v", e.Event, e.Addr, e.Slot)
+	case CannotGasFeeDelayRWEvent:
+		return fmt.Sprintf("(%v)", e.Event)
+	}
+	return "Unknown"
+}
+
 type RWTxList struct {
 	list []int
 }
@@ -421,18 +439,24 @@ func (s *MVStates) asyncRWEventLoop() {
 
 func (s *MVStates) handleRWEvents(items []RWEventItem) {
 	readFrom, readTo := -1, -1
+	writeFrom, writeTo := -1, -1
 	recordNewTx := false
 	for i, item := range items {
 		// init next RWSet, and finalise previous RWSet
 		if item.Event == NewTxRWEvent {
 			// handle previous rw set
 			if recordNewTx {
-				var prevItems []RWEventItem
+				var readItems []RWEventItem
+				var writeItems []RWEventItem
 				if readFrom >= 0 && readTo > readFrom {
-					prevItems = items[readFrom:readTo]
+					readItems = items[readFrom:readTo]
 				}
-				s.finalisePreviousRWSet(prevItems)
+				if writeFrom >= 0 && writeTo > writeFrom {
+					writeItems = items[writeFrom:writeTo]
+				}
+				s.finalisePreviousRWSet(readItems, writeItems)
 				readFrom, readTo = -1, -1
+				writeFrom, writeTo = -1, -1
 			}
 			recordNewTx = true
 			s.asyncRWSet = RWSet{
@@ -452,8 +476,16 @@ func (s *MVStates) handleRWEvents(items []RWEventItem) {
 			}
 			readTo = i + 1
 		case WriteAccRWEvent:
+			if writeFrom < 0 {
+				writeFrom = i
+			}
+			writeTo = i + 1
 			s.finaliseAccWrite(s.asyncRWSet.index, item.Addr, item.State)
 		case WriteSlotRWEvent:
+			if writeFrom < 0 {
+				writeFrom = i
+			}
+			writeTo = i + 1
 			s.finaliseSlotWrite(s.asyncRWSet.index, item.Addr, item.Slot)
 		// recorde current as cannot gas fee delay
 		case CannotGasFeeDelayRWEvent:
@@ -462,15 +494,19 @@ func (s *MVStates) handleRWEvents(items []RWEventItem) {
 	}
 	// handle last tx rw set
 	if recordNewTx {
-		var prevItems []RWEventItem
+		var readItems []RWEventItem
+		var writeItems []RWEventItem
 		if readFrom >= 0 && readTo > readFrom {
-			prevItems = items[readFrom:readTo]
+			readItems = items[readFrom:readTo]
 		}
-		s.finalisePreviousRWSet(prevItems)
+		if writeFrom >= 0 && writeTo > writeFrom {
+			writeItems = items[writeFrom:writeTo]
+		}
+		s.finalisePreviousRWSet(readItems, writeItems)
 	}
 }
 
-func (s *MVStates) finalisePreviousRWSet(reads []RWEventItem) {
+func (s *MVStates) finalisePreviousRWSet(reads []RWEventItem, writes []RWEventItem) {
 	if s.asyncRWSet.index < 0 {
 		return
 	}
@@ -479,6 +515,7 @@ func (s *MVStates) finalisePreviousRWSet(reads []RWEventItem) {
 		s.rwSets = append(s.rwSets, RWSet{index: -1})
 	}
 	s.rwSets[index] = s.asyncRWSet
+	log.Debug("finalisePreviousRWSet", "tx", index, "excluded", s.asyncRWSet.excludedTx, "reads", reads, "writes", writes)
 
 	if index > s.nextFinaliseIndex {
 		log.Error("finalise in wrong order", "next", s.nextFinaliseIndex, "input", index)
@@ -804,6 +841,7 @@ func (s *MVStates) resolveDepsMapCacheByWrites(index int, reads []RWEventItem) {
 			break
 		}
 	}
+	log.Debug("resolveDepsMapCacheByWrites before", "tx", index, "deps", depSlice.deps())
 	// clear redundancy deps compared with prev
 	preDeps := depSlice.deps()
 	var removed []uint64
