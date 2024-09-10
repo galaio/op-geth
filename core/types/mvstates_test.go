@@ -257,7 +257,7 @@ func BenchmarkEmptyMap(b *testing.B) {
 
 func BenchmarkInitMapWithSize(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		m := make(map[int][10]byte, 10)
+		m := make(map[int][10]byte, 1000)
 		for j := 0; j < 1000; j++ {
 			m[i] = [10]byte{byte(j)}
 		}
@@ -266,12 +266,12 @@ func BenchmarkInitMapWithSize(b *testing.B) {
 
 func BenchmarkReuseMap(b *testing.B) {
 	sp := sync.Pool{New: func() interface{} {
-		return make(map[int]struct{}, 10)
+		return make(map[int][10]byte, 10)
 	}}
 	for i := 0; i < b.N; i++ {
-		m := sp.Get().(map[int]struct{})
+		m := sp.Get().(map[int][10]byte)
 		for j := 0; j < 1000; j++ {
-			m[i] = struct{}{}
+			m[i] = [10]byte{byte(j)}
 		}
 		for k := range m {
 			delete(m, k)

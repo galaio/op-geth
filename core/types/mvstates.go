@@ -273,6 +273,18 @@ var (
 		buf := make([]TxDep, 0)
 		return &buf
 	}}
+	accWriteSetPool = sync.Pool{New: func() any {
+		return make(map[common.Address]map[AccountState]*StateWrites)
+	}}
+	accWriteSetSubPool = sync.Pool{New: func() any {
+		return make(map[AccountState]*StateWrites)
+	}}
+	slotWriteSetPool = sync.Pool{New: func() any {
+		return make(map[common.Address]map[common.Hash]*StateWrites)
+	}}
+	slotWriteSetSubPool = sync.Pool{New: func() any {
+		return make(map[common.Hash]*StateWrites)
+	}}
 )
 
 type MVStates struct {
@@ -300,15 +312,17 @@ type MVStates struct {
 
 func NewMVStates(txCount int, gasFeeReceivers []common.Address) *MVStates {
 	s := &MVStates{
-		accWriteSet:     make(map[common.Address]map[AccountState]*StateWrites, txCount),
-		slotWriteSet:    make(map[common.Address]map[common.Hash]*StateWrites, txCount),
 		rwEventCh:       make(chan *[]RWEventItem, 100),
 		gasFeeReceivers: gasFeeReceivers,
 	}
+
 	s.rwSets = rwSetsPool.Get().(*[]RWSet)
 	*s.rwSets = (*s.rwSets)[:0]
 	s.txDepCache = txDepsPool.Get().(*[]TxDep)
 	*s.txDepCache = (*s.txDepCache)[:0]
+
+	s.accWriteSet = accWriteSetPool.Get().(map[common.Address]map[AccountState]*StateWrites)
+	s.slotWriteSet = slotWriteSetPool.Get().(map[common.Address]map[common.Hash]*StateWrites)
 
 	s.rwEventCachePtr = rwEventCachePool.Get().(*[]RWEventItem)
 	*s.rwEventCachePtr = (*s.rwEventCachePtr)[:cap(*s.rwEventCachePtr)]
@@ -339,7 +353,7 @@ func (s *MVStates) Copy() *MVStates {
 	for addr, sub := range s.accWriteSet {
 		for state, writes := range sub {
 			if _, ok := ns.accWriteSet[addr]; !ok {
-				ns.accWriteSet[addr] = make(map[AccountState]*StateWrites)
+				ns.accWriteSet[addr] = accWriteSetSubPool.Get().(map[AccountState]*StateWrites)
 			}
 			ns.accWriteSet[addr][state] = writes.Copy()
 		}
@@ -347,7 +361,7 @@ func (s *MVStates) Copy() *MVStates {
 	for addr, sub := range s.slotWriteSet {
 		for slot, writes := range sub {
 			if _, ok := ns.slotWriteSet[addr]; !ok {
-				ns.slotWriteSet[addr] = make(map[common.Hash]*StateWrites)
+				ns.slotWriteSet[addr] = slotWriteSetSubPool.Get().(map[common.Hash]*StateWrites)
 			}
 			ns.slotWriteSet[addr][slot] = writes.Copy()
 		}
@@ -626,7 +640,7 @@ func (s *MVStates) innerFinalise(index int, applyWriteSet bool) error {
 	// append to pending write set
 	for addr, sub := range rwSet.accWriteSet {
 		if _, exist := s.accWriteSet[addr]; !exist {
-			s.accWriteSet[addr] = make(map[AccountState]*StateWrites)
+			s.accWriteSet[addr] = accWriteSetSubPool.Get().(map[AccountState]*StateWrites)
 		}
 		for state := range sub {
 			if _, exist := s.accWriteSet[addr][state]; !exist {
@@ -639,7 +653,7 @@ func (s *MVStates) innerFinalise(index int, applyWriteSet bool) error {
 	}
 	for addr, sub := range rwSet.slotWriteSet {
 		if _, exist := s.slotWriteSet[addr]; !exist {
-			s.slotWriteSet[addr] = make(map[common.Hash]*StateWrites)
+			s.slotWriteSet[addr] = slotWriteSetSubPool.Get().(map[common.Hash]*StateWrites)
 		}
 		for slot := range sub {
 			if _, exist := s.slotWriteSet[addr][slot]; !exist {
@@ -656,7 +670,7 @@ func (s *MVStates) innerFinalise(index int, applyWriteSet bool) error {
 func (s *MVStates) finaliseSlotWrite(index int, addr common.Address, slot common.Hash) {
 	// append to pending write set
 	if _, exist := s.slotWriteSet[addr]; !exist {
-		s.slotWriteSet[addr] = make(map[common.Hash]*StateWrites)
+		s.slotWriteSet[addr] = slotWriteSetSubPool.Get().(map[common.Hash]*StateWrites)
 	}
 	if _, exist := s.slotWriteSet[addr][slot]; !exist {
 		sw := stateWritesPool.Get().(*StateWrites)
@@ -669,7 +683,7 @@ func (s *MVStates) finaliseSlotWrite(index int, addr common.Address, slot common
 func (s *MVStates) finaliseAccWrite(index int, addr common.Address, state AccountState) {
 	// append to pending write set
 	if _, exist := s.accWriteSet[addr]; !exist {
-		s.accWriteSet[addr] = make(map[AccountState]*StateWrites)
+		s.accWriteSet[addr] = accWriteSetSubPool.Get().(map[AccountState]*StateWrites)
 	}
 	if _, exist := s.accWriteSet[addr][state]; !exist {
 		sw := stateWritesPool.Get().(*StateWrites)
@@ -919,16 +933,25 @@ func (s *MVStates) FeeReceivers() []common.Address {
 func (s *MVStates) ReuseMem() {
 	rwSetsPool.Put(s.rwSets)
 	txDepsPool.Put(s.txDepCache)
-	for _, sub := range s.accWriteSet {
-		for _, writes := range sub {
+	for addr, sub := range s.accWriteSet {
+		for state, writes := range sub {
+			delete(sub, state)
 			stateWritesPool.Put(writes)
 		}
+		delete(s.accWriteSet, addr)
+		accWriteSetSubPool.Put(sub)
 	}
-	for _, sub := range s.slotWriteSet {
-		for _, writes := range sub {
+	accWriteSetPool.Put(s.accWriteSet)
+
+	for addr, sub := range s.slotWriteSet {
+		for slot, writes := range sub {
+			delete(sub, slot)
 			stateWritesPool.Put(writes)
 		}
+		delete(s.slotWriteSet, addr)
+		slotWriteSetSubPool.Put(sub)
 	}
+	slotWriteSetPool.Put(s.slotWriteSet)
 }
 
 func checkAccDependency(writeSet map[common.Address]map[AccountState]struct{}, readSet map[common.Address]map[AccountState]struct{}) bool {
