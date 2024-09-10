@@ -20,17 +20,6 @@ var (
 	AccountSuicide  AccountState = 0x10
 )
 
-const (
-	initRWEventCacheSize = 40
-)
-
-func init() {
-	for i := 0; i < initRWEventCacheSize; i++ {
-		cache := make([]RWEventItem, 200)
-		rwEventCachePool.Put(&cache)
-	}
-}
-
 // RWSet record all read & write set in txs
 // Attention: this is not a concurrent safety structure
 type RWSet struct {
@@ -52,12 +41,6 @@ func NewRWSet(index int) *RWSet {
 		accWriteSet:  make(map[common.Address]map[AccountState]struct{}),
 		slotReadSet:  make(map[common.Address]map[common.Hash]struct{}),
 		slotWriteSet: make(map[common.Address]map[common.Hash]struct{}),
-	}
-}
-
-func NewEmptyRWSet(index int) *RWSet {
-	return &RWSet{
-		index: index,
 	}
 }
 
@@ -279,24 +262,35 @@ var (
 		buf := make([]RWEventItem, 0)
 		return &buf
 	}}
+	stateWritesPool = sync.Pool{New: func() any {
+		return NewStateWrites()
+	}}
+	rwSetsPool = sync.Pool{New: func() any {
+		buf := make([]RWSet, 0)
+		return &buf
+	}}
+	txDepsPool = sync.Pool{New: func() any {
+		buf := make([]TxDep, 0)
+		return &buf
+	}}
 )
 
 type MVStates struct {
-	rwSets              map[int]*RWSet
-	pendingAccWriteSet  map[common.Address]map[AccountState]*StateWrites
-	pendingSlotWriteSet map[common.Address]map[common.Hash]*StateWrites
-	nextFinaliseIndex   int
-	gasFeeReceivers     []common.Address
+	rwSets            *[]RWSet
+	accWriteSet       map[common.Address]map[AccountState]*StateWrites
+	slotWriteSet      map[common.Address]map[common.Hash]*StateWrites
+	nextFinaliseIndex int
+	gasFeeReceivers   []common.Address
 	// dependency map cache for generating TxDAG
 	// depMapCache[i].exist(j) means j->i, and i > j
-	txDepCache map[int]TxDep
+	txDepCache *[]TxDep
 	lock       sync.RWMutex
 
 	// async rw event recorder
 	// these fields are only used in one routine
-	asyncRWSet        *RWSet
-	rwEventCh         chan []RWEventItem
-	rwEventCache      []RWEventItem
+	asyncRWSet        RWSet
+	rwEventCh         chan *[]RWEventItem
+	rwEventCachePtr   *[]RWEventItem
 	rwEventCacheIndex int
 	recordingRead     bool
 	recordingWrite    bool
@@ -305,18 +299,22 @@ type MVStates struct {
 }
 
 func NewMVStates(txCount int, gasFeeReceivers []common.Address) *MVStates {
-	m := &MVStates{
-		rwSets:              make(map[int]*RWSet, txCount),
-		pendingAccWriteSet:  make(map[common.Address]map[AccountState]*StateWrites, txCount),
-		pendingSlotWriteSet: make(map[common.Address]map[common.Hash]*StateWrites, txCount),
-		txDepCache:          make(map[int]TxDep, txCount),
-		rwEventCh:           make(chan []RWEventItem, 100),
-		gasFeeReceivers:     gasFeeReceivers,
+	s := &MVStates{
+		accWriteSet:     make(map[common.Address]map[AccountState]*StateWrites, txCount),
+		slotWriteSet:    make(map[common.Address]map[common.Hash]*StateWrites, txCount),
+		rwEventCh:       make(chan *[]RWEventItem, 100),
+		gasFeeReceivers: gasFeeReceivers,
 	}
-	m.rwEventCache = *rwEventCachePool.Get().(*[]RWEventItem)
-	m.rwEventCache = m.rwEventCache[:cap(m.rwEventCache)]
-	m.rwEventCacheIndex = 0
-	return m
+	s.rwSets = rwSetsPool.Get().(*[]RWSet)
+	*s.rwSets = (*s.rwSets)[:0]
+	s.txDepCache = txDepsPool.Get().(*[]TxDep)
+	*s.txDepCache = (*s.txDepCache)[:0]
+
+	s.rwEventCachePtr = rwEventCachePool.Get().(*[]RWEventItem)
+	*s.rwEventCachePtr = (*s.rwEventCachePtr)[:cap(*s.rwEventCachePtr)]
+	s.rwEventCacheIndex = 0
+	s.asyncRWSet.index = -1
+	return s
 }
 
 func (s *MVStates) EnableAsyncGen() *MVStates {
@@ -328,33 +326,30 @@ func (s *MVStates) EnableAsyncGen() *MVStates {
 
 func (s *MVStates) Stop() {
 	s.stopAsyncRecorder()
+	s.ReuseMem()
 }
 
 func (s *MVStates) Copy() *MVStates {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	ns := NewMVStates(len(s.rwSets), s.gasFeeReceivers)
+	ns := NewMVStates(len(*s.rwSets), s.gasFeeReceivers)
 	ns.nextFinaliseIndex = s.nextFinaliseIndex
-	for k, v := range s.txDepCache {
-		ns.txDepCache[k] = v
-	}
-	for k, v := range s.rwSets {
-		ns.rwSets[k] = v
-	}
-	for addr, sub := range s.pendingAccWriteSet {
+	*ns.txDepCache = append(*ns.txDepCache, *s.txDepCache...)
+	*ns.rwSets = append(*ns.rwSets, *s.rwSets...)
+	for addr, sub := range s.accWriteSet {
 		for state, writes := range sub {
-			if _, ok := ns.pendingAccWriteSet[addr]; !ok {
-				ns.pendingAccWriteSet[addr] = make(map[AccountState]*StateWrites)
+			if _, ok := ns.accWriteSet[addr]; !ok {
+				ns.accWriteSet[addr] = make(map[AccountState]*StateWrites)
 			}
-			ns.pendingAccWriteSet[addr][state] = writes.Copy()
+			ns.accWriteSet[addr][state] = writes.Copy()
 		}
 	}
-	for addr, sub := range s.pendingSlotWriteSet {
+	for addr, sub := range s.slotWriteSet {
 		for slot, writes := range sub {
-			if _, ok := ns.pendingSlotWriteSet[addr]; !ok {
-				ns.pendingSlotWriteSet[addr] = make(map[common.Hash]*StateWrites)
+			if _, ok := ns.slotWriteSet[addr]; !ok {
+				ns.slotWriteSet[addr] = make(map[common.Hash]*StateWrites)
 			}
-			ns.pendingSlotWriteSet[addr][slot] = writes.Copy()
+			ns.slotWriteSet[addr][slot] = writes.Copy()
 		}
 	}
 	return ns
@@ -364,12 +359,12 @@ func (s *MVStates) asyncRWEventLoop() {
 	defer s.asyncWG.Done()
 	for {
 		select {
-		case items, ok := <-s.rwEventCh:
+		case item, ok := <-s.rwEventCh:
 			if !ok {
 				return
 			}
-			s.handleRWEvents(items)
-			rwEventCachePool.Put(&items)
+			s.handleRWEvents(*item)
+			rwEventCachePool.Put(item)
 		}
 	}
 }
@@ -390,10 +385,12 @@ func (s *MVStates) handleRWEvents(items []RWEventItem) {
 				readFrom, readTo = -1, -1
 			}
 			recordNewTx = true
-			s.asyncRWSet = NewEmptyRWSet(item.Index)
+			s.asyncRWSet = RWSet{
+				index: item.Index,
+			}
 			continue
 		}
-		if s.asyncRWSet == nil {
+		if s.asyncRWSet.index < 0 {
 			continue
 		}
 		switch item.Event {
@@ -423,11 +420,14 @@ func (s *MVStates) handleRWEvents(items []RWEventItem) {
 }
 
 func (s *MVStates) finalisePreviousRWSet(reads []RWEventItem) {
-	if s.asyncRWSet == nil {
+	if s.asyncRWSet.index < 0 {
 		return
 	}
 	index := s.asyncRWSet.index
-	s.rwSets[index] = s.asyncRWSet
+	for index >= len(*s.rwSets) {
+		*s.rwSets = append(*s.rwSets, RWSet{index: -1})
+	}
+	(*s.rwSets)[index] = s.asyncRWSet
 
 	if index > s.nextFinaliseIndex {
 		log.Error("finalise in wrong order", "next", s.nextFinaliseIndex, "input", index)
@@ -442,14 +442,14 @@ func (s *MVStates) RecordNewTx(index int) {
 	if !s.asyncRunning {
 		return
 	}
-	if index%10 == 0 {
+	if index%20 == 0 {
 		s.BatchRecordHandle()
 	}
-	if s.rwEventCacheIndex < len(s.rwEventCache) {
-		s.rwEventCache[s.rwEventCacheIndex].Event = NewTxRWEvent
-		s.rwEventCache[s.rwEventCacheIndex].Index = index
+	if s.rwEventCacheIndex < len(*s.rwEventCachePtr) {
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Event = NewTxRWEvent
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Index = index
 	} else {
-		s.rwEventCache = append(s.rwEventCache, RWEventItem{
+		*s.rwEventCachePtr = append(*s.rwEventCachePtr, RWEventItem{
 			Event: NewTxRWEvent,
 			Index: index,
 		})
@@ -471,14 +471,14 @@ func (s *MVStates) RecordAccountRead(addr common.Address, state AccountState) {
 	if !s.asyncRunning || !s.recordingRead {
 		return
 	}
-	if s.rwEventCacheIndex < len(s.rwEventCache) {
-		s.rwEventCache[s.rwEventCacheIndex].Event = ReadAccRWEvent
-		s.rwEventCache[s.rwEventCacheIndex].Addr = addr
-		s.rwEventCache[s.rwEventCacheIndex].State = state
+	if s.rwEventCacheIndex < len(*s.rwEventCachePtr) {
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Event = ReadAccRWEvent
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Addr = addr
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].State = state
 		s.rwEventCacheIndex++
 		return
 	}
-	s.rwEventCache = append(s.rwEventCache, RWEventItem{
+	*s.rwEventCachePtr = append(*s.rwEventCachePtr, RWEventItem{
 		Event: ReadAccRWEvent,
 		Addr:  addr,
 		State: state,
@@ -490,14 +490,14 @@ func (s *MVStates) RecordStorageRead(addr common.Address, slot common.Hash) {
 	if !s.asyncRunning || !s.recordingRead {
 		return
 	}
-	if s.rwEventCacheIndex < len(s.rwEventCache) {
-		s.rwEventCache[s.rwEventCacheIndex].Event = ReadSlotRWEvent
-		s.rwEventCache[s.rwEventCacheIndex].Addr = addr
-		s.rwEventCache[s.rwEventCacheIndex].Slot = slot
+	if s.rwEventCacheIndex < len(*s.rwEventCachePtr) {
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Event = ReadSlotRWEvent
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Addr = addr
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Slot = slot
 		s.rwEventCacheIndex++
 		return
 	}
-	s.rwEventCache = append(s.rwEventCache, RWEventItem{
+	*s.rwEventCachePtr = append(*s.rwEventCachePtr, RWEventItem{
 		Event: ReadSlotRWEvent,
 		Addr:  addr,
 		Slot:  slot,
@@ -509,14 +509,14 @@ func (s *MVStates) RecordAccountWrite(addr common.Address, state AccountState) {
 	if !s.asyncRunning || !s.recordingWrite {
 		return
 	}
-	if s.rwEventCacheIndex < len(s.rwEventCache) {
-		s.rwEventCache[s.rwEventCacheIndex].Event = WriteAccRWEvent
-		s.rwEventCache[s.rwEventCacheIndex].Addr = addr
-		s.rwEventCache[s.rwEventCacheIndex].State = state
+	if s.rwEventCacheIndex < len(*s.rwEventCachePtr) {
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Event = WriteAccRWEvent
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Addr = addr
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].State = state
 		s.rwEventCacheIndex++
 		return
 	}
-	s.rwEventCache = append(s.rwEventCache, RWEventItem{
+	*s.rwEventCachePtr = append(*s.rwEventCachePtr, RWEventItem{
 		Event: WriteAccRWEvent,
 		Addr:  addr,
 		State: state,
@@ -528,14 +528,14 @@ func (s *MVStates) RecordStorageWrite(addr common.Address, slot common.Hash) {
 	if !s.asyncRunning || !s.recordingWrite {
 		return
 	}
-	if s.rwEventCacheIndex < len(s.rwEventCache) {
-		s.rwEventCache[s.rwEventCacheIndex].Event = WriteSlotRWEvent
-		s.rwEventCache[s.rwEventCacheIndex].Addr = addr
-		s.rwEventCache[s.rwEventCacheIndex].Slot = slot
+	if s.rwEventCacheIndex < len(*s.rwEventCachePtr) {
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Event = WriteSlotRWEvent
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Addr = addr
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Slot = slot
 		s.rwEventCacheIndex++
 		return
 	}
-	s.rwEventCache = append(s.rwEventCache, RWEventItem{
+	*s.rwEventCachePtr = append(*s.rwEventCachePtr, RWEventItem{
 		Event: WriteSlotRWEvent,
 		Addr:  addr,
 		Slot:  slot,
@@ -547,12 +547,12 @@ func (s *MVStates) RecordCannotDelayGasFee() {
 	if !s.asyncRunning || !s.recordingWrite {
 		return
 	}
-	if s.rwEventCacheIndex < len(s.rwEventCache) {
-		s.rwEventCache[s.rwEventCacheIndex].Event = CannotGasFeeDelayRWEvent
+	if s.rwEventCacheIndex < len(*s.rwEventCachePtr) {
+		(*s.rwEventCachePtr)[s.rwEventCacheIndex].Event = CannotGasFeeDelayRWEvent
 		s.rwEventCacheIndex++
 		return
 	}
-	s.rwEventCache = append(s.rwEventCache, RWEventItem{
+	*s.rwEventCachePtr = append(*s.rwEventCachePtr, RWEventItem{
 		Event: CannotGasFeeDelayRWEvent,
 	})
 	s.rwEventCacheIndex++
@@ -562,9 +562,11 @@ func (s *MVStates) BatchRecordHandle() {
 	if !s.asyncRunning || s.rwEventCacheIndex == 0 {
 		return
 	}
-	s.rwEventCh <- s.rwEventCache[:s.rwEventCacheIndex]
-	s.rwEventCache = *rwEventCachePool.Get().(*[]RWEventItem)
-	s.rwEventCache = s.rwEventCache[:cap(s.rwEventCache)]
+	*s.rwEventCachePtr = (*s.rwEventCachePtr)[:s.rwEventCacheIndex]
+	s.rwEventCh <- s.rwEventCachePtr
+
+	s.rwEventCachePtr = rwEventCachePool.Get().(*[]RWEventItem)
+	*s.rwEventCachePtr = (*s.rwEventCachePtr)[:cap(*s.rwEventCachePtr)]
 	s.rwEventCacheIndex = 0
 }
 
@@ -573,7 +575,7 @@ func (s *MVStates) stopAsyncRecorder() {
 		s.BatchRecordHandle()
 		s.asyncRunning = false
 		close(s.rwEventCh)
-		rwEventCachePool.Put(&s.rwEventCache)
+		rwEventCachePool.Put(s.rwEventCachePtr)
 		s.asyncWG.Wait()
 	}
 }
@@ -583,7 +585,10 @@ func (s *MVStates) FinaliseWithRWSet(rwSet *RWSet) error {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	index := rwSet.index
-	s.rwSets[index] = rwSet
+	for index >= len(*s.rwSets) {
+		*s.rwSets = append(*s.rwSets, RWSet{index: -1})
+	}
+	(*s.rwSets)[index] = *rwSet
 	// just finalise all previous txs
 	start := s.nextFinaliseIndex
 	if start > index {
@@ -593,7 +598,7 @@ func (s *MVStates) FinaliseWithRWSet(rwSet *RWSet) error {
 		if err := s.innerFinalise(i, true); err != nil {
 			return err
 		}
-		s.resolveDepsMapCacheByWrites(i, s.rwSets[i])
+		s.resolveDepsMapCacheByWrites(i, &((*s.rwSets)[i]))
 		//log.Debug("Finalise the reads/writes", "index", i,
 		//	"readCnt", len(s.rwSets[i].accReadSet)+len(s.rwSets[i].slotReadSet),
 		//	"writeCnt", len(s.rwSets[i].accWriteSet)+len(s.rwSets[i].slotWriteSet))
@@ -603,11 +608,11 @@ func (s *MVStates) FinaliseWithRWSet(rwSet *RWSet) error {
 }
 
 func (s *MVStates) innerFinalise(index int, applyWriteSet bool) error {
-	rwSet := s.rwSets[index]
-	if rwSet == nil {
+	if index >= len(*s.rwSets) {
 		return fmt.Errorf("finalise a non-exist RWSet, index: %d", index)
 	}
 
+	rwSet := (*s.rwSets)[index]
 	if index > s.nextFinaliseIndex {
 		return fmt.Errorf("finalise in wrong order, next: %d, input: %d", s.nextFinaliseIndex, index)
 	}
@@ -620,25 +625,29 @@ func (s *MVStates) innerFinalise(index int, applyWriteSet bool) error {
 
 	// append to pending write set
 	for addr, sub := range rwSet.accWriteSet {
-		if _, exist := s.pendingAccWriteSet[addr]; !exist {
-			s.pendingAccWriteSet[addr] = make(map[AccountState]*StateWrites)
+		if _, exist := s.accWriteSet[addr]; !exist {
+			s.accWriteSet[addr] = make(map[AccountState]*StateWrites)
 		}
 		for state := range sub {
-			if _, exist := s.pendingAccWriteSet[addr][state]; !exist {
-				s.pendingAccWriteSet[addr][state] = NewStateWrites()
+			if _, exist := s.accWriteSet[addr][state]; !exist {
+				sw := stateWritesPool.Get().(*StateWrites)
+				sw.list = sw.list[:0]
+				s.accWriteSet[addr][state] = sw
 			}
-			s.pendingAccWriteSet[addr][state].Append(index)
+			s.accWriteSet[addr][state].Append(index)
 		}
 	}
 	for addr, sub := range rwSet.slotWriteSet {
-		if _, exist := s.pendingSlotWriteSet[addr]; !exist {
-			s.pendingSlotWriteSet[addr] = make(map[common.Hash]*StateWrites)
+		if _, exist := s.slotWriteSet[addr]; !exist {
+			s.slotWriteSet[addr] = make(map[common.Hash]*StateWrites)
 		}
 		for slot := range sub {
-			if _, exist := s.pendingSlotWriteSet[addr][slot]; !exist {
-				s.pendingSlotWriteSet[addr][slot] = NewStateWrites()
+			if _, exist := s.slotWriteSet[addr][slot]; !exist {
+				sw := stateWritesPool.Get().(*StateWrites)
+				sw.list = sw.list[:0]
+				s.slotWriteSet[addr][slot] = sw
 			}
-			s.pendingSlotWriteSet[addr][slot].Append(index)
+			s.slotWriteSet[addr][slot].Append(index)
 		}
 	}
 	return nil
@@ -646,45 +655,52 @@ func (s *MVStates) innerFinalise(index int, applyWriteSet bool) error {
 
 func (s *MVStates) finaliseSlotWrite(index int, addr common.Address, slot common.Hash) {
 	// append to pending write set
-	if _, exist := s.pendingSlotWriteSet[addr]; !exist {
-		s.pendingSlotWriteSet[addr] = make(map[common.Hash]*StateWrites)
+	if _, exist := s.slotWriteSet[addr]; !exist {
+		s.slotWriteSet[addr] = make(map[common.Hash]*StateWrites)
 	}
-	if _, exist := s.pendingSlotWriteSet[addr][slot]; !exist {
-		s.pendingSlotWriteSet[addr][slot] = NewStateWrites()
+	if _, exist := s.slotWriteSet[addr][slot]; !exist {
+		sw := stateWritesPool.Get().(*StateWrites)
+		sw.list = sw.list[:0]
+		s.slotWriteSet[addr][slot] = sw
 	}
-	s.pendingSlotWriteSet[addr][slot].Append(index)
+	s.slotWriteSet[addr][slot].Append(index)
 }
 
 func (s *MVStates) finaliseAccWrite(index int, addr common.Address, state AccountState) {
 	// append to pending write set
-	if _, exist := s.pendingAccWriteSet[addr]; !exist {
-		s.pendingAccWriteSet[addr] = make(map[AccountState]*StateWrites)
+	if _, exist := s.accWriteSet[addr]; !exist {
+		s.accWriteSet[addr] = make(map[AccountState]*StateWrites)
 	}
-	if _, exist := s.pendingAccWriteSet[addr][state]; !exist {
-		s.pendingAccWriteSet[addr][state] = NewStateWrites()
+	if _, exist := s.accWriteSet[addr][state]; !exist {
+		sw := stateWritesPool.Get().(*StateWrites)
+		sw.list = sw.list[:0]
+		s.accWriteSet[addr][state] = sw
 	}
-	s.pendingAccWriteSet[addr][state].Append(index)
+	s.accWriteSet[addr][state].Append(index)
 }
 
 func (s *MVStates) queryAccWrites(addr common.Address, state AccountState) *StateWrites {
-	if _, exist := s.pendingAccWriteSet[addr]; !exist {
+	if _, exist := s.accWriteSet[addr]; !exist {
 		return nil
 	}
-	return s.pendingAccWriteSet[addr][state]
+	return s.accWriteSet[addr][state]
 }
 
 func (s *MVStates) querySlotWrites(addr common.Address, slot common.Hash) *StateWrites {
-	if _, exist := s.pendingSlotWriteSet[addr]; !exist {
+	if _, exist := s.slotWriteSet[addr]; !exist {
 		return nil
 	}
-	return s.pendingSlotWriteSet[addr][slot]
+	return s.slotWriteSet[addr][slot]
 }
 
 // resolveDepsMapCacheByWrites must be executed in order
 func (s *MVStates) resolveDepsMapCacheByWrites(index int, rwSet *RWSet) {
+	for index >= len(*s.txDepCache) {
+		*s.txDepCache = append(*s.txDepCache, TxDep{})
+	}
 	// analysis dep, if the previous transaction is not executed/validated, re-analysis is required
 	if rwSet.excludedTx {
-		s.txDepCache[index] = NewTxDep([]uint64{}, ExcludedTxFlag)
+		(*s.txDepCache)[index] = NewTxDep([]uint64{}, ExcludedTxFlag)
 		return
 	}
 	depSlice := NewTxDepSlice(0)
@@ -731,7 +747,7 @@ func (s *MVStates) resolveDepsMapCacheByWrites(index int, rwSet *RWSet) {
 	preDeps := depSlice.deps()
 	var removed []uint64
 	for _, prev := range preDeps {
-		for _, tx := range s.txDepCache[int(prev)].TxIndexes {
+		for _, tx := range (*s.txDepCache)[int(prev)].TxIndexes {
 			if depSlice.exist(tx) {
 				removed = append(removed, tx)
 			}
@@ -741,18 +757,21 @@ func (s *MVStates) resolveDepsMapCacheByWrites(index int, rwSet *RWSet) {
 		depSlice.remove(tx)
 	}
 	//log.Debug("resolveDepsMapCacheByWrites", "tx", index, "deps", depMap.deps())
-	s.txDepCache[index] = NewTxDep(depSlice.deps())
+	(*s.txDepCache)[index] = NewTxDep(depSlice.deps())
 }
 
 // resolveDepsMapCacheByWrites2 must be executed in order
 func (s *MVStates) resolveDepsMapCacheByWrites2(index int, reads []RWEventItem) {
-	rwSet := s.rwSets[index]
+	for index >= len(*s.txDepCache) {
+		*s.txDepCache = append(*s.txDepCache, TxDep{})
+	}
+	rwSet := (*s.rwSets)[index]
 	// analysis dep, if the previous transaction is not executed/validated, re-analysis is required
 	if rwSet.excludedTx {
-		s.txDepCache[index] = NewTxDep([]uint64{}, ExcludedTxFlag)
+		(*s.txDepCache)[index] = NewTxDep([]uint64{}, ExcludedTxFlag)
 		return
 	}
-	depSlice := NewTxDepSlice(0)
+	depSlice := NewTxDepSlice(1)
 	addrMap := make(map[common.Address]struct{})
 	// check tx dependency, only check key
 	for _, item := range reads {
@@ -795,7 +814,7 @@ func (s *MVStates) resolveDepsMapCacheByWrites2(index int, reads []RWEventItem) 
 	preDeps := depSlice.deps()
 	var removed []uint64
 	for _, prev := range preDeps {
-		for _, tx := range s.txDepCache[int(prev)].TxIndexes {
+		for _, tx := range (*s.txDepCache)[int(prev)].TxIndexes {
 			if depSlice.exist(tx) {
 				removed = append(removed, tx)
 			}
@@ -805,24 +824,27 @@ func (s *MVStates) resolveDepsMapCacheByWrites2(index int, reads []RWEventItem) 
 		depSlice.remove(tx)
 	}
 	//log.Debug("resolveDepsMapCacheByWrites", "tx", index, "deps", depSlice.deps())
-	s.txDepCache[index] = NewTxDep(depSlice.deps())
+	(*s.txDepCache)[index] = NewTxDep(depSlice.deps())
 }
 
 // resolveDepsCache must be executed in order
 func (s *MVStates) resolveDepsCache(index int, rwSet *RWSet) {
+	for index >= len(*s.txDepCache) {
+		*s.txDepCache = append(*s.txDepCache, TxDep{})
+	}
 	// analysis dep, if the previous transaction is not executed/validated, re-analysis is required
 	if rwSet.excludedTx {
-		s.txDepCache[index] = NewTxDep([]uint64{}, ExcludedTxFlag)
+		(*s.txDepCache)[index] = NewTxDep([]uint64{}, ExcludedTxFlag)
 		return
 	}
 	depMap := NewTxDepMap(0)
 	for prev := 0; prev < index; prev++ {
 		// if there are some parallel execution or system txs, it will fulfill in advance
 		// it's ok, and try re-generate later
-		prevSet := s.rwSets[prev]
-		if prevSet == nil {
+		if prev >= len(*s.rwSets) {
 			continue
 		}
+		prevSet := (*s.rwSets)[prev]
 		// if prev tx is tagged ExcludedTxFlag, just skip the check
 		if prevSet.excludedTx {
 			continue
@@ -832,7 +854,7 @@ func (s *MVStates) resolveDepsCache(index int, rwSet *RWSet) {
 			depMap.add(uint64(prev))
 			// clear redundancy deps compared with prev
 			for _, dep := range depMap.deps() {
-				if slices.Contains(s.txDepCache[prev].TxIndexes, dep) {
+				if slices.Contains((*s.txDepCache)[prev].TxIndexes, dep) {
 					depMap.remove(dep)
 				}
 			}
@@ -841,13 +863,13 @@ func (s *MVStates) resolveDepsCache(index int, rwSet *RWSet) {
 			depMap.add(uint64(prev))
 			// clear redundancy deps compared with prev
 			for _, dep := range depMap.deps() {
-				if slices.Contains(s.txDepCache[prev].TxIndexes, dep) {
+				if slices.Contains((*s.txDepCache)[prev].TxIndexes, dep) {
 					depMap.remove(dep)
 				}
 			}
 		}
 	}
-	s.txDepCache[index] = NewTxDep(depMap.deps())
+	(*s.txDepCache)[index] = NewTxDep(depMap.deps())
 }
 
 // ResolveTxDAG generate TxDAG from RWSets
@@ -861,33 +883,52 @@ func (s *MVStates) ResolveTxDAG(txCnt int, extraTxDeps ...TxDep) (TxDAG, error) 
 	}
 
 	totalCnt := txCnt + len(extraTxDeps)
-	txDAG := NewPlainTxDAG(totalCnt)
 	for i := 0; i < txCnt; i++ {
-		if s.rwSets[i].cannotGasFeeDelay {
+		if (*s.rwSets)[i].cannotGasFeeDelay {
 			return NewEmptyTxDAG(), nil
 		}
-		cache := s.txDepCache[i]
-		if len(cache.TxIndexes) <= (txCnt-1)/2 {
-			txDAG.TxDeps[i] = cache
+	}
+	txDAG := &PlainTxDAG{
+		TxDeps: *s.txDepCache,
+	}
+	if len(extraTxDeps) > 0 {
+		txDAG.TxDeps = append(txDAG.TxDeps, extraTxDeps...)
+	}
+	for i := 0; i < len(txDAG.TxDeps); i++ {
+		if len(txDAG.TxDeps[i].TxIndexes) <= (totalCnt-1)/2 {
 			continue
 		}
 		// if tx deps larger than half of txs, then convert with NonDependentRelFlag
 		txDAG.TxDeps[i].SetFlag(NonDependentRelFlag)
-		for j := uint64(0); j < uint64(txCnt); j++ {
-			if !slices.Contains(cache.TxIndexes, j) && j != uint64(i) {
-				txDAG.TxDeps[i].TxIndexes = append(txDAG.TxDeps[i].TxIndexes, j)
+		nd := make([]uint64, 0, totalCnt-1-len(txDAG.TxDeps[i].TxIndexes))
+		for j := uint64(0); j < uint64(totalCnt); j++ {
+			if !slices.Contains(txDAG.TxDeps[i].TxIndexes, j) && j != uint64(i) {
+				nd = append(nd, j)
 			}
 		}
+		txDAG.TxDeps[i].TxIndexes = nd
 	}
-	for i, j := txCnt, 0; i < totalCnt && j < len(extraTxDeps); i, j = i+1, j+1 {
-		txDAG.TxDeps[i] = extraTxDeps[j]
-	}
-
+	*s.txDepCache = txDAG.TxDeps
 	return txDAG, nil
 }
 
 func (s *MVStates) FeeReceivers() []common.Address {
 	return s.gasFeeReceivers
+}
+
+func (s *MVStates) ReuseMem() {
+	rwSetsPool.Put(s.rwSets)
+	txDepsPool.Put(s.txDepCache)
+	for _, sub := range s.accWriteSet {
+		for _, writes := range sub {
+			stateWritesPool.Put(writes)
+		}
+	}
+	for _, sub := range s.slotWriteSet {
+		for _, writes := range sub {
+			stateWritesPool.Put(writes)
+		}
+	}
 }
 
 func checkAccDependency(writeSet map[common.Address]map[AccountState]struct{}, readSet map[common.Address]map[AccountState]struct{}) bool {
