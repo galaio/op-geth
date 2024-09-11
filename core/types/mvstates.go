@@ -20,6 +20,23 @@ var (
 	AccountSuicide  AccountState = 0x10
 )
 
+const (
+	initSyncPoolSize = 4
+)
+
+func init() {
+	for i := 0; i < initSyncPoolSize*4; i++ {
+		cache := make([]RWEventItem, 400)
+		rwEventCachePool.Put(&cache)
+	}
+	for i := 0; i < initSyncPoolSize; i++ {
+		rwSets := make([]RWSet, 4000)
+		rwSetsPool.Put(&rwSets)
+		txDeps := make([]TxDep, 4000)
+		txDepsPool.Put(&txDeps)
+	}
+}
+
 // RWSet record all read & write set in txs
 // Attention: this is not a concurrent safety structure
 type RWSet struct {
@@ -259,18 +276,18 @@ func (w *StateWrites) Copy() *StateWrites {
 
 var (
 	rwEventCachePool = sync.Pool{New: func() any {
-		buf := make([]RWEventItem, 0)
+		buf := make([]RWEventItem, 400)
 		return &buf
 	}}
 	stateWritesPool = sync.Pool{New: func() any {
 		return NewStateWrites()
 	}}
 	rwSetsPool = sync.Pool{New: func() any {
-		buf := make([]RWSet, 0)
+		buf := make([]RWSet, 4000)
 		return &buf
 	}}
 	txDepsPool = sync.Pool{New: func() any {
-		buf := make([]TxDep, 0)
+		buf := make([]TxDep, 4000)
 		return &buf
 	}}
 	accWriteSetPool = sync.Pool{New: func() any {
@@ -340,7 +357,7 @@ func (s *MVStates) EnableAsyncGen() *MVStates {
 
 func (s *MVStates) Stop() {
 	s.stopAsyncRecorder()
-	s.ReuseMem()
+	go s.ReuseMem()
 }
 
 func (s *MVStates) Copy() *MVStates {

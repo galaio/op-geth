@@ -329,32 +329,24 @@ func BenchmarkSliceReuse(b *testing.B) {
 		s := make([]int, 0)
 		return &s
 	}}
-	for i := 0; i < 4; i++ {
-		s := make([]int, 100)
-		pool.Put(&s)
-	}
+	//for i := 0; i < 4; i++ {
+	//	s := make([]int, 100)
+	//	pool.Put(&s)
+	//}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		s := pool.Get().(*[]int)
-		//b.Log("get", fmt.Sprintf("%p, %d, %d", s, len(*s), cap(*s)))
-		//if len(*s) == 0 {
-		//	b.Log("got 0")
-		//}
-		ns := *s
-		ns = ns[:cap(ns)]
-		handleSlice(pool, s)
+		*s = (*s)[:0]
+		handleSlice(i, pool, s)
 	}
 }
 
-func handleSlice(pool *sync.Pool, s *[]int) {
-	//for i := 0; i < 100; i++ {
-	//	s[i] = i
-	//}
-	if len(*s) < 1 {
-		*s = append(*s, 1)
+func handleSlice(i int, pool *sync.Pool, s *[]int) {
+	if i%2 == 0 {
+		for len(*s) < 100 {
+			*s = append(*s, 1)
+		}
 	}
-	*s = (*s)[:1]
-	//pool.Put(&s)
 	pool.Put(s)
 }
 
