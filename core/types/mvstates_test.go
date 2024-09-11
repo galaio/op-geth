@@ -66,7 +66,7 @@ func TestMVStates_ResolveTxDAG_Compare(t *testing.T) {
 	ms2 := NewMVStates(txCnt, nil).EnableAsyncGen()
 	ms3 := NewMVStates(txCnt, nil).EnableAsyncGen()
 	for i, rwSet := range rwSets {
-		*ms1.rwSets = append(*ms1.rwSets, *rwSet)
+		ms1.rwSets = append(ms1.rwSets, *rwSet)
 		require.NoError(t, ms2.FinaliseWithRWSet(rwSet))
 		ms3.handleRWEvents(mockRWEventItemsFromRWSet(i, rwSet))
 	}
@@ -140,7 +140,7 @@ func init() {
 func BenchmarkResolveTxDAGInMVStates(b *testing.B) {
 	ms1 := NewMVStates(mockRWSetSize, nil).EnableAsyncGen()
 	for _, rwSet := range mockRandRWSets {
-		*ms1.rwSets = append(*ms1.rwSets, *rwSet)
+		ms1.rwSets = append(ms1.rwSets, *rwSet)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -324,37 +324,11 @@ func BenchmarkSlicePtrPool_3(b *testing.B) {
 	}
 }
 
-func BenchmarkSliceReuse(b *testing.B) {
-	pool := &sync.Pool{New: func() any {
-		s := make([]int, 0)
-		return &s
-	}}
-	//for i := 0; i < 4; i++ {
-	//	s := make([]int, 100)
-	//	pool.Put(&s)
-	//}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		s := pool.Get().(*[]int)
-		*s = (*s)[:0]
-		handleSlice(i, pool, s)
-	}
-}
-
-func handleSlice(i int, pool *sync.Pool, s *[]int) {
-	if i%2 == 0 {
-		for len(*s) < 100 {
-			*s = append(*s, 1)
-		}
-	}
-	pool.Put(s)
-}
-
 func resolveTxDAGInMVStates(s *MVStates, txCnt int) TxDAG {
 	txDAG := NewPlainTxDAG(txCnt)
 	for i := 0; i < txCnt; i++ {
-		s.resolveDepsCache(i, &(*s.rwSets)[i])
-		txDAG.TxDeps[i] = (*s.txDepCache)[i]
+		s.resolveDepsCache(i, &s.rwSets[i])
+		txDAG.TxDeps[i] = s.txDepCache[i]
 	}
 	return txDAG
 }
@@ -363,8 +337,8 @@ func resolveDepsMapCacheByWritesInMVStates(s *MVStates) TxDAG {
 	txCnt := s.nextFinaliseIndex
 	txDAG := NewPlainTxDAG(txCnt)
 	for i := 0; i < txCnt; i++ {
-		s.resolveDepsMapCacheByWrites(i, &(*s.rwSets)[i])
-		txDAG.TxDeps[i] = (*s.txDepCache)[i]
+		s.resolveDepsMapCacheByWrites(i, &s.rwSets[i])
+		txDAG.TxDeps[i] = s.txDepCache[i]
 	}
 	return txDAG
 }
@@ -373,7 +347,7 @@ func resolveDepsMapCacheByWrites2InMVStates(s *MVStates) TxDAG {
 	txCnt := s.nextFinaliseIndex
 	txDAG := NewPlainTxDAG(txCnt)
 	for i := 0; i < txCnt; i++ {
-		txDAG.TxDeps[i] = (*s.txDepCache)[i]
+		txDAG.TxDeps[i] = s.txDepCache[i]
 	}
 	return txDAG
 }
