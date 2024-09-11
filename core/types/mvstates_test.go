@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -236,91 +235,6 @@ func BenchmarkMVStates_Finalise(b *testing.B) {
 		for _, rwSet := range rwSets {
 			ms1.FinaliseWithRWSet(rwSet)
 		}
-	}
-}
-
-func checkMap(m map[int][10]byte) {
-	for i, j := range m {
-		m[i] = j
-	}
-}
-
-func BenchmarkEmptyMap(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		m := make(map[int][10]byte)
-		for j := 0; j < 10000; j++ {
-			m[i] = [10]byte{byte(j)}
-		}
-		checkMap(m)
-	}
-}
-
-func BenchmarkInitMapWithSize(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		m := make(map[int][10]byte, 1000)
-		for j := 0; j < 1000; j++ {
-			m[i] = [10]byte{byte(j)}
-		}
-	}
-}
-
-func BenchmarkReuseMap(b *testing.B) {
-	sp := sync.Pool{New: func() interface{} {
-		return make(map[int][10]byte, 10)
-	}}
-	for i := 0; i < b.N; i++ {
-		m := sp.Get().(map[int][10]byte)
-		for j := 0; j < 1000; j++ {
-			m[i] = [10]byte{byte(j)}
-		}
-		for k := range m {
-			delete(m, k)
-		}
-		sp.Put(m)
-	}
-}
-
-func BenchmarkExistArray(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		m := make(map[[20]byte]struct{})
-		m[common.Address{1}] = struct{}{}
-		addr := common.Address{1}
-		if _, ok := m[addr]; ok {
-			continue
-		}
-	}
-}
-
-func BenchmarkDonotExistArray(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		m := make(map[[20]byte]struct{})
-		addr := common.Address{1}
-		if _, ok := m[addr]; !ok {
-			m[addr] = struct{}{}
-			delete(m, addr)
-		}
-	}
-}
-func BenchmarkSlicePtrPool_3(b *testing.B) {
-	pool := sync.Pool{
-		New: func() interface{} {
-			s := make([]int, 0, 0)
-			return &s
-		},
-	}
-	for i := 0; i < 4; i++ {
-		s := make([]int, 100)
-		pool.Put(&s)
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		ptr := pool.Get().(*[]int)
-		s := *ptr
-		s = s[0:0]
-		s = append(s, 123)
-		*ptr = s // Copy the stack header over to the heap
-		pool.Put(ptr)
 	}
 }
 

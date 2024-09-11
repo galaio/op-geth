@@ -7,6 +7,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/metrics"
 	"golang.org/x/exp/slices"
 )
 
@@ -21,7 +22,8 @@ var (
 )
 
 const (
-	initSyncPoolSize = 4
+	initSyncPoolSize  = 4
+	asyncSendInterval = 20
 )
 
 func init() {
@@ -34,6 +36,34 @@ func init() {
 		rwSetsPool.Put(&rwSets)
 		txDeps := make([]TxDep, 4000)
 		txDepsPool.Put(&txDeps)
+	}
+}
+
+type ChanPool struct {
+	ch  chan any
+	new func() any
+}
+
+func NewChanPool(size int, f func() any) *ChanPool {
+	return &ChanPool{
+		ch:  make(chan any, size),
+		new: f,
+	}
+}
+
+func (p ChanPool) Get() any {
+	select {
+	case item := <-p.ch:
+		return item
+	default:
+	}
+	return p.new()
+}
+
+func (p ChanPool) Put(item any) {
+	select {
+	case p.ch <- item:
+	default:
 	}
 }
 
@@ -275,20 +305,29 @@ func (w *StateWrites) Copy() *StateWrites {
 }
 
 var (
-	rwEventCachePool = sync.Pool{New: func() any {
+	rwEventsAllocMeter = metrics.GetOrRegisterMeter("mvstate/alloc/rwevents/cnt", nil)
+	rwSetsAllocMeter   = metrics.GetOrRegisterMeter("mvstate/alloc/rwsets/cnt", nil)
+	txDepsAllocMeter   = metrics.GetOrRegisterMeter("mvstate/alloc/txdeps/cnt", nil)
+)
+
+var (
+	rwEventCachePool = NewChanPool(initSyncPoolSize*4, func() any {
+		rwEventsAllocMeter.Mark(1)
 		buf := make([]RWEventItem, 0)
 		return &buf
-	}}
-	stateWritesPool = sync.Pool{New: func() any {
-		return NewStateWrites()
-	}}
+	})
 	rwSetsPool = sync.Pool{New: func() any {
+		rwSetsAllocMeter.Mark(1)
 		buf := make([]RWSet, 0)
 		return &buf
 	}}
 	txDepsPool = sync.Pool{New: func() any {
+		txDepsAllocMeter.Mark(1)
 		buf := make([]TxDep, 0)
 		return &buf
+	}}
+	stateWritesPool = sync.Pool{New: func() any {
+		return NewStateWrites()
 	}}
 	accWriteSetPool = sync.Pool{New: func() any {
 		return make(map[common.Address]map[AccountState]*StateWrites)
@@ -347,7 +386,7 @@ func (s *MVStates) EnableAsyncGen() *MVStates {
 	s.asyncWG.Add(1)
 	s.asyncRunning = true
 	s.rwEventCache = *rwEventCachePool.Get().(*[]RWEventItem)
-	s.rwEventCache = (s.rwEventCache)[:cap(s.rwEventCache)]
+	s.rwEventCache = s.rwEventCache[:cap(s.rwEventCache)]
 	s.rwEventCacheIndex = 0
 	s.asyncRWSet.index = -1
 	go s.asyncRWEventLoop()
@@ -472,12 +511,12 @@ func (s *MVStates) RecordNewTx(index int) {
 	if !s.asyncRunning {
 		return
 	}
-	if index%20 == 0 {
+	if index%asyncSendInterval == 0 {
 		s.BatchRecordHandle()
 	}
 	if s.rwEventCacheIndex < len(s.rwEventCache) {
-		(s.rwEventCache)[s.rwEventCacheIndex].Event = NewTxRWEvent
-		(s.rwEventCache)[s.rwEventCacheIndex].Index = index
+		s.rwEventCache[s.rwEventCacheIndex].Event = NewTxRWEvent
+		s.rwEventCache[s.rwEventCacheIndex].Index = index
 	} else {
 		s.rwEventCache = append(s.rwEventCache, RWEventItem{
 			Event: NewTxRWEvent,
@@ -502,9 +541,9 @@ func (s *MVStates) RecordAccountRead(addr common.Address, state AccountState) {
 		return
 	}
 	if s.rwEventCacheIndex < len(s.rwEventCache) {
-		(s.rwEventCache)[s.rwEventCacheIndex].Event = ReadAccRWEvent
-		(s.rwEventCache)[s.rwEventCacheIndex].Addr = addr
-		(s.rwEventCache)[s.rwEventCacheIndex].State = state
+		s.rwEventCache[s.rwEventCacheIndex].Event = ReadAccRWEvent
+		s.rwEventCache[s.rwEventCacheIndex].Addr = addr
+		s.rwEventCache[s.rwEventCacheIndex].State = state
 		s.rwEventCacheIndex++
 		return
 	}
@@ -592,9 +631,7 @@ func (s *MVStates) BatchRecordHandle() {
 	if !s.asyncRunning || s.rwEventCacheIndex == 0 {
 		return
 	}
-	s.rwEventCache = s.rwEventCache[:s.rwEventCacheIndex]
-	s.rwEventCh <- s.rwEventCache
-
+	s.rwEventCh <- s.rwEventCache[:s.rwEventCacheIndex]
 	s.rwEventCache = *rwEventCachePool.Get().(*[]RWEventItem)
 	s.rwEventCache = s.rwEventCache[:cap(s.rwEventCache)]
 	s.rwEventCacheIndex = 0
