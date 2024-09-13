@@ -168,6 +168,7 @@ var (
 		utils.RollupHaltOnIncompatibleProtocolVersionFlag,
 		utils.RollupSuperchainUpgradesFlag,
 		utils.ParallelTxDAGFlag,
+		utils.ParallelTxDAGFileFlag,
 		utils.ParallelTxDAGSenderPrivFlag,
 		configFileFlag,
 		utils.LogDebugFlag,
