@@ -461,8 +461,16 @@ func (s *MVStates) handleRWEvents(items []RWEventItem) {
 			}
 			readTo = i + 1
 		case WriteAccRWEvent:
+			if writeFrom < 0 {
+				writeFrom = i
+			}
+			writeTo = i + 1
 			s.finaliseAccWrite(s.asyncRWSet.index, item.Addr, item.State)
 		case WriteSlotRWEvent:
+			if writeFrom < 0 {
+				writeFrom = i
+			}
+			writeTo = i + 1
 			s.finaliseSlotWrite(s.asyncRWSet.index, item.Addr, item.Slot)
 		// recorde current as cannot gas fee delay
 		case CannotGasFeeDelayRWEvent:
@@ -492,7 +500,7 @@ func (s *MVStates) finalisePreviousRWSet(reads []RWEventItem, writes []RWEventIt
 		s.rwSets = append(s.rwSets, RWSet{index: -1})
 	}
 	s.rwSets[index] = s.asyncRWSet
-	log.Debug("finalisePreviousRWSet", "tx", index, "rwset", s.asyncRWSet)
+	log.Debug("finalisePreviousRWSet", "tx", index, "excluded", s.asyncRWSet.excludedTx, "reads", reads, "writes", writes)
 
 	if index > s.nextFinaliseIndex {
 		log.Error("finalise in wrong order", "next", s.nextFinaliseIndex, "input", index)
