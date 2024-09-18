@@ -358,6 +358,8 @@ func TestRWSet(t *testing.T) {
 	mockRWSetWithAddr(set, common.Address{3}, []interface{}{AccountSelf, AccountBalance, "0x01", "0x01"},
 		[]interface{}{AccountBalance, AccountCodeHash, "0x01"})
 	t.Log(set)
+	items := mockRWEventItemsFromRWSet(0, set)
+	t.Log(items)
 }
 
 func TestTxRecorder_CannotDelayGasFee(t *testing.T) {
