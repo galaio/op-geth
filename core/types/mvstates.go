@@ -813,9 +813,11 @@ func (s *MVStates) resolveDepsMapCacheByWrites(index int, reads []RWEventItem) {
 			writes = s.querySlotWrites(item.Addr, item.Slot)
 		}
 		if writes != nil {
-			if find := writes.FindLastWrite(index); find >= 0 {
-				if tx := uint64(find); !depSlice.exist(tx) {
-					depSlice.add(tx)
+			if finds := writes.FindPrevWrites(index); len(finds) > 0 {
+				for i := range finds {
+					if tx := uint64(finds[i]); !depSlice.exist(tx) {
+						depSlice.add(tx)
+					}
 				}
 			}
 		}
@@ -827,9 +829,11 @@ func (s *MVStates) resolveDepsMapCacheByWrites(index int, reads []RWEventItem) {
 		addrMap[item.Addr] = struct{}{}
 		writes = s.queryAccWrites(item.Addr, AccountSuicide)
 		if writes != nil {
-			if find := writes.FindLastWrite(index); find >= 0 {
-				if tx := uint64(find); !depSlice.exist(tx) {
-					depSlice.add(tx)
+			if finds := writes.FindPrevWrites(index); len(finds) > 0 {
+				for i := range finds {
+					if tx := uint64(finds[i]); !depSlice.exist(tx) {
+						depSlice.add(tx)
+					}
 				}
 			}
 		}
