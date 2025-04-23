@@ -18,11 +18,15 @@
 package core
 
 import (
+	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
+	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -298,7 +302,8 @@ type BlockChain struct {
 	vmConfig   vm.Config
 
 	// parallel EVM related
-	enableTxDAG bool
+	enableTxDAG  bool
+	txDAGWriteCh chan TxDAGOutputItem
 }
 
 // NewBlockChain returns a fully initialised block chain using information
@@ -2639,7 +2644,51 @@ func (bc *BlockChain) TxDAGEnabledWhenMine() bool {
 	return bc.enableTxDAG
 }
 
-func (bc *BlockChain) SetupTxDAGGeneration() {
-	log.Info("node enable TxDAG feature")
+func (bc *BlockChain) SetupTxDAGGeneration(output string) {
+	log.Info("node enable TxDAG feature", "output", output)
 	bc.enableTxDAG = true
+	if len(output) == 0 {
+		return
+	}
+
+	// write handler
+	go func() {
+		writeHandle, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+		if err != nil {
+			log.Error("OpenFile when open the txDAG output file", "file", output, "err", err)
+			return
+		}
+		bc.txDAGWriteCh = make(chan TxDAGOutputItem, 10000)
+		defer writeHandle.Close()
+		for {
+			select {
+			case <-bc.quit:
+				return
+			case item := <-bc.txDAGWriteCh:
+				if err := writeTxDAGToFile(writeHandle, item); err != nil {
+					log.Error("encode TxDAG err in OutputHandler", "err", err)
+					continue
+				}
+			}
+		}
+	}()
+}
+
+type TxDAGOutputItem struct {
+	blockNumber uint64
+	txDAG       types.TxDAG
+}
+
+func writeTxDAGToFile(writeHandle *os.File, item TxDAGOutputItem) error {
+	var buf bytes.Buffer
+	buf.WriteString(strconv.FormatUint(item.blockNumber, 10))
+	buf.WriteByte(',')
+	enc, err := types.EncodeTxDAG(item.txDAG)
+	if err != nil {
+		return err
+	}
+	buf.WriteString(hex.EncodeToString(enc))
+	buf.WriteByte('\n')
+	_, err = writeHandle.Write(buf.Bytes())
+	return err
 }

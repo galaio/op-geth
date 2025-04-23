@@ -136,6 +136,13 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 			if metrics.EnabledExpensive {
 				go types.EvaluateTxDAGPerformance(dag)
 			}
+			// try to write txDAG into file
+			if p.bc.txDAGWriteCh != nil && dag != nil {
+				p.bc.txDAGWriteCh <- TxDAGOutputItem{
+					blockNumber: block.NumberU64(),
+					txDAG:       dag,
+				}
+			}
 		} else {
 			log.Error("ResolveTxDAG err", "block", block.NumberU64(), "tx", len(block.Transactions()), "err", err)
 		}
